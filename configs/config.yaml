@@ -1,0 +1,27 @@
+!!python/object:__main__.AppConfig
+adc_bits: 6
+adc_scale_input: true
+config_file: template.yaml
+dac_bits: 4
+driver_distortion_data_path: ./data/driver_distortion_data.csv
+driver_distortion_polyfit_order: 6
+driver_distortion_strength: 0.0
+jtc_half_size: 8
+jtc_separation: 0
+jtc_total_field: 16
+mrm_phase_data_path: ./data/mrm_phase_data.csv
+mrm_phase_distortion_strength: 0.0
+mrm_phase_polyfit_order: 3
+mrm_power_data_path: ./data/mrm_power_data.csv
+mrm_power_distortion_strength: 0.0
+mrm_power_polyfit_order: 3
+output_dir: tempdir
+pd_tia_distortion_data_path: ./data/pd_tia_distortion_data.csv
+pd_tia_distortion_polyfit_order: 3
+pd_tia_distortion_strength: 0.0
+num_identical_layers: 5
+num_epochs: 20
+learning_rate: 1e-3
+batch_size: 128
+eval_only: False
+pretrained_weights: ""
