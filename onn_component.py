@@ -80,7 +80,7 @@ class Driver(nn.Module):
 
 class PD_TIA(nn.Module):
     def __init__(self, config: AppConfig):
-        super(Driver, self).__init__()
+        super().__init__()
         self.config = config
         if self.config.pd_tia_distortion_data_path is None:
             raise ValueError("PD-TIA distortion data path is not set")
@@ -101,7 +101,7 @@ class PD_TIA(nn.Module):
 
 class MRM(nn.Module):
     def __init__(self, config: AppConfig):
-        super(Driver, self).__init__()
+        super().__init__()
         self.config = config
         if self.config.mrm_power_data_path is None:
             raise ValueError("MRM power data path is not set")
