@@ -46,7 +46,7 @@ def _plot_fit(
         x,
         y_poly,
         "r--",
-        label=f"Poly fit (deg {poly_order}, R²={r_squared:.3f})",
+        label=f"Poly fit (deg {poly_order}, R²={r_squared:.5f})",
     )
     plt.xlabel("Input")
     plt.ylabel("Output")
