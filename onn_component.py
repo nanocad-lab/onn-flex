@@ -1,3 +1,5 @@
+from typing import Tuple
+
 from onn_config import AppConfig
 import torch
 import torch.nn as nn
@@ -153,7 +155,8 @@ class JTC(nn.Module):
         x = self.pd_tia(x)
         return x
 
-    def forward(self, signal, kernel):
+    def generate_input_plane(self, signal: torch.Tensor, kernel: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
+        """Apply input distortion and build the JTC input plane."""
         M = signal.shape[0]
         N = kernel.shape[0]
 
@@ -177,22 +180,28 @@ class JTC(nn.Module):
         input_plane[kernel_start:kernel_end] = kernel_distorted
         input_plane[signal_start:signal_end] = signal_distorted
 
+        return input_plane, M, N
+
+    def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
+        """Perform FFT and shift the result."""
         jft = torch.fft.fft(input_plane)
         jft = torch.fft.fftshift(jft)  # DC in center for optical lens
+        return jft
 
+    def post_output_distortion(self, jft: torch.Tensor) -> torch.Tensor:
+        """Apply output distortion after the Fourier plane."""
         jps = self.output_distortion(torch.abs(jft) ** 2)
         jps = jps / self.jtc_total_field  # fft normalization by L
+        return jps
 
+    def final_output(self, jps: torch.Tensor, N: int) -> torch.Tensor:
+        """Propagate back to the detector plane and crop the result."""
         jps = self.input_distortion(jps)
 
         output_plane = torch.fft.fft(jps)
         output_plane = torch.fft.fftshift(output_plane)  # DC in center for optical lens
         output_plane = torch.abs(output_plane)
         output_plane = self.output_distortion(output_plane)
-
-        # xcorr_start = self.jtc_total_field//2 +self.jtc_separation + 1
-        # xcorr_end = self.jtc_total_field//2 +self.jtc_separation + 1 + (N + M - 1)
-        # indices = torch.arange(xcorr_start, xcorr_end) % self.jtc_total_field
 
         same_indices = (
             torch.arange(
@@ -202,3 +211,9 @@ class JTC(nn.Module):
             % self.jtc_total_field
         )
         return output_plane[same_indices]
+
+    def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        input_plane, _, N = self.generate_input_plane(signal, kernel)
+        jft = self.post_fft(input_plane)
+        jps = self.post_output_distortion(jft)
+        return self.final_output(jps, N)
