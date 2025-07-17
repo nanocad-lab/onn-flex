@@ -125,6 +125,50 @@ def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
     np.save(os.path.join(output_dir, "jtc_test_output.npy"), out.cpu().numpy())
 
 
+def _plot_array(arr: torch.Tensor, title: str, save_path: str) -> None:
+    plt.figure(figsize=(6, 4))
+    arr_np = arr.detach().cpu().numpy()
+    plt.plot(arr_np)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+
+def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
+    """Plot intermediate JTC stages and compare with PyTorch conv."""
+    driver = Driver(config)
+    pd_tia = PD_TIA(config)
+    mrm = MRM(config)
+    jtc = JTC(config, driver, mrm, pd_tia)
+
+    torch.manual_seed(1)
+    signal = torch.rand(8)
+    kernel = torch.rand(8)
+
+    input_plane, _, N = jtc.generate_input_plane(signal, kernel)
+    jft = jtc.post_fft(input_plane)
+    jps = jtc.post_output_distortion(jft)
+    out = jtc.final_output(jps, N)
+
+    _plot_array(torch.abs(input_plane), "input plane", os.path.join(output_dir, "stage_input_plane.png"))
+    _plot_array(torch.abs(jft), "post fft", os.path.join(output_dir, "stage_post_fft.png"))
+    _plot_array(jps, "post output distortion", os.path.join(output_dir, "stage_post_output.png"))
+
+    conv_out = torch.nn.functional.conv1d(
+        signal.view(1, 1, -1), kernel.view(1, 1, -1), padding=kernel.shape[0] // 2
+    )[0, 0, : out.shape[0]]
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(out.detach().cpu().numpy(), label="jtc")
+    plt.plot(conv_out.detach().cpu().numpy(), label="torch_conv")
+    plt.title("final output comparison")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "stage_final_comparison.png"))
+    plt.close()
+
+
 def run_pretrain_tests(config: AppConfig) -> None:
     """Generate plots + basic checks before starting (or instead of) training."""
     os.makedirs(config.output_dir, exist_ok=True)
@@ -169,8 +213,9 @@ def run_pretrain_tests(config: AppConfig) -> None:
         )
         _sweep_and_plot(config.mrm_phase_data_path, deg, config.output_dir, "mrm_phase")
 
-    # Quick JTC sanity check
+    # Quick JTC sanity check and stage plots
     try:
         _range_check_jtc(config, config.output_dir)
+        _stage_plots_jtc(config, config.output_dir)
     except Exception as e:
         print(f"[ERROR] JTC range check failed: {e}")
