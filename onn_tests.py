@@ -12,11 +12,42 @@ from onn_config import AppConfig
 from onn_component import get_ideal_degree, get_coeffs, Driver, PD_TIA, MRM, JTC
 
 
-def _plot_fit(x: np.ndarray, y: np.ndarray, y_lin: np.ndarray, y_poly: np.ndarray, title: str, save_path: str) -> None:
+def _plot_fit(
+    x: np.ndarray,
+    y: np.ndarray,
+    y_ref: np.ndarray,
+    y_poly: np.ndarray,
+    ref_order: int,
+    poly_order: int,
+    title: str,
+    save_path: str,
+) -> None:
+    """Plot raw CSV data against a reference polynomial fit and the higher-order distortion fit.
+
+    Args:
+        x: Input values from the CSV.
+        y: Output values from the CSV.
+        y_ref: Values predicted by the reference fit (typically linear).
+        y_poly: Values predicted by the polynomial distortion fit.
+        ref_order: Order of the reference polynomial used for *y_ref*.
+        poly_order: Order of the distortion polynomial used for *y_poly*.
+        title: Title for the plot.
+        save_path: Where to save the PNG.
+    """
+    # Compute R^2 for the distortion polynomial fit
+    ss_res = np.sum((y - y_poly) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
     plt.figure(figsize=(6, 4))
     plt.plot(x, y, "k.", label="CSV data")
-    plt.plot(x, y_lin, "b-", label="Linear fit")
-    plt.plot(x, y_poly, "r--", label="Poly fit")
+    plt.plot(x, y_ref, "b-", label=f"Ref fit (deg {ref_order})")
+    plt.plot(
+        x,
+        y_poly,
+        "r--",
+        label=f"Poly fit (deg {poly_order}, R²={r_squared:.3f})",
+    )
     plt.xlabel("Input")
     plt.ylabel("Output")
     plt.title(title)
@@ -26,7 +57,22 @@ def _plot_fit(x: np.ndarray, y: np.ndarray, y_lin: np.ndarray, y_poly: np.ndarra
     plt.close()
 
 
-def _sweep_and_plot(csv_path: str, degree: int, output_dir: str, tag: str) -> None:
+def _sweep_and_plot(
+    csv_path: str,
+    degree: int,
+    output_dir: str,
+    tag: str,
+    ref_degree: int = 1,
+) -> None:
+    """Load a CSV I/O sweep, fit polynomials, and save a comparison plot.
+
+    Args:
+        csv_path: Path to the CSV containing *input* and *output* columns.
+        degree: Order of the main polynomial used to model distortion.
+        output_dir: Where to write the PNG plot.
+        tag: Descriptive tag inserted into the file name and plot title.
+        ref_degree: Order of the reference polynomial (defaults to 1 → linear).
+    """
     if not os.path.exists(csv_path):
         print(f"[WARNING] CSV file not found: {csv_path}. Skipping {tag} plot.")
         return
@@ -35,16 +81,25 @@ def _sweep_and_plot(csv_path: str, degree: int, output_dir: str, tag: str) -> No
     x = data["input"].values
     y = data["output"].values
 
-    # Linear behaviour (degree 1 fit)
-    lin_coeff = np.polyfit(x, y, 1)
-    y_lin = np.polyval(lin_coeff, x)
+    # Reference behaviour (could be linear or higher order)
+    ref_coeff = np.polyfit(x, y, ref_degree)
+    y_ref = np.polyval(ref_coeff, x)
 
-    # Polynomial fit
+    # Distortion polynomial fit
     poly_coeff = get_coeffs(csv_path, degree)
     y_poly = np.polyval(poly_coeff, x)
 
     plot_path = os.path.join(output_dir, f"{tag}_fit.png")
-    _plot_fit(x, y, y_lin, y_poly, f"{tag} distortion fit", plot_path)
+    _plot_fit(
+        x,
+        y,
+        y_ref,
+        y_poly,
+        ref_degree,
+        degree,
+        f"{tag} distortion fit",
+        plot_path,
+    )
     print(f"[TEST] Saved plot {plot_path}")
 
 
@@ -80,10 +135,18 @@ def run_pretrain_tests(config: AppConfig) -> None:
         deg = config.driver_distortion_polyfit_order or get_ideal_degree(config.driver_distortion_data_path)
         _sweep_and_plot(config.driver_distortion_data_path, deg, config.output_dir, "driver")
 
-    # PD/TIA
+    # PD/TIA (use 2nd-order reference instead of linear)
     if config.pd_tia_distortion_data_path and os.path.exists(config.pd_tia_distortion_data_path):
-        deg = config.pd_tia_distortion_polyfit_order or get_ideal_degree(config.pd_tia_distortion_data_path)
-        _sweep_and_plot(config.pd_tia_distortion_data_path, deg, config.output_dir, "pd_tia")
+        deg = config.pd_tia_distortion_polyfit_order or get_ideal_degree(
+            config.pd_tia_distortion_data_path
+        )
+        _sweep_and_plot(
+            config.pd_tia_distortion_data_path,
+            deg,
+            config.output_dir,
+            "pd_tia",
+            ref_degree=2,
+        )
 
     # MRM power
     if config.mrm_power_data_path and os.path.exists(config.mrm_power_data_path):
