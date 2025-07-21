@@ -157,7 +157,9 @@ class JTC(nn.Module):
         x = self.pd_tia(x)
         return x
 
-    def generate_input_plane(self, signal: torch.Tensor, kernel: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
+    def generate_input_plane(
+        self, signal: torch.Tensor, kernel: torch.Tensor
+    ) -> Tuple[torch.Tensor, int, int]:
         """Apply input distortion and build the JTC input plane."""
         M = signal.shape[0]
         N = kernel.shape[0]
