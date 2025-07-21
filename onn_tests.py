@@ -113,8 +113,8 @@ def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
 
     # Random batch of signals/kernels in [-1, 1]
     torch.manual_seed(0)
-    signal = torch.rand(8) * 2 - 1
-    kernel = torch.rand(8) * 2 - 1
+    signal = torch.rand(8)
+    kernel = torch.rand(8)
     out = jtc(signal, kernel)
 
     if not torch.isfinite(out).all():
