@@ -3,8 +3,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 
 
@@ -17,7 +15,7 @@ def calculate_aic(y_true, y_pred, n_params):
     return aic
 
 
-def get_ideal_degree(csv_file, max_degree=10):
+def get_ideal_degree(csv_file, max_degree: int = 10):
     """
     Fit polynomials to CSV data and print results
 
@@ -49,7 +47,7 @@ def get_ideal_degree(csv_file, max_degree=10):
     return "fail"
 
 
-def get_coeffs(csv_file, degree):
+def get_coeffs(csv_file, degree: int):
     data = pd.read_csv(csv_file)
     x = data["input"].values
     y = data["output"].values
@@ -61,6 +59,7 @@ class Driver(nn.Module):
     def __init__(self, config: AppConfig):
         super(Driver, self).__init__()
         self.config = config
+        self.degree: int = 0
         if self.config.driver_distortion_data_path is None:
             raise ValueError("Driver distortion data path is not set")
         if self.config.driver_distortion_polyfit_order is None:
@@ -82,6 +81,7 @@ class PD_TIA(nn.Module):
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
+        self.degree: int = 0
         if self.config.pd_tia_distortion_data_path is None:
             raise ValueError("PD-TIA distortion data path is not set")
         if self.config.pd_tia_distortion_polyfit_order is None:
@@ -103,6 +103,8 @@ class MRM(nn.Module):
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
+        self.phase_degree: int = 0
+        self.pwr_degree: int = 0
         if self.config.mrm_power_data_path is None:
             raise ValueError("MRM power data path is not set")
         if self.config.mrm_power_polyfit_order is None:

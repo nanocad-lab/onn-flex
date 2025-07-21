@@ -1,7 +1,6 @@
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
@@ -10,6 +9,7 @@ __all__ = ["PIC", "FTconvlayer"]
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 def _check_8(x: int, name: str):
     if x != 8:
@@ -41,7 +41,9 @@ class PIC(nn.Module):
         plane_size = self.plane_size
         sep = self.sep
 
-        input_plane_batch = torch.zeros(B, plane_size, dtype=torch.complex64, device=signal_batch.device)
+        input_plane_batch = torch.zeros(
+            B, plane_size, dtype=torch.complex64, device=signal_batch.device
+        )
 
         kernel_start = 0
         kernel_end = kernel_start + M
@@ -78,7 +80,9 @@ class PIC(nn.Module):
         input_full = input.repeat(1, 1, wes[0], 1)
         weight_full = weights.repeat(ins[0], ins[1], 1, 1)
 
-        batch_size_for_jtc = input_full.shape[0] * input_full.shape[1] * input_full.shape[2]
+        batch_size_for_jtc = (
+            input_full.shape[0] * input_full.shape[1] * input_full.shape[2]
+        )
         signal_reshaped = input_full.reshape(batch_size_for_jtc, 8)
         kernel_reshaped = weight_full.reshape(batch_size_for_jtc, 8)
 
@@ -195,13 +199,17 @@ class FTconvlayer(_ConvNd):
         self.PIC_CONV = PIC(plane_size, sep)
 
     # ---------------- Internal helpers ------------------
-    def hardware_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def hardware_forward(
+        self, input: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
         return self.PIC_CONV(input, weight)
 
     def conv_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         input_shape = input.shape
         w = input.shape[2]
-        output = torch.zeros(input_shape[0], self.out_channels, w, w, device=input.device)
+        output = torch.zeros(
+            input_shape[0], self.out_channels, w, w, device=input.device
+        )
         input = input.permute(0, 3, 1, 2)
         for c_in in range(input.shape[2]):
             input_c = input[:, :, c_in : c_in + 1, ...]
@@ -225,9 +233,13 @@ class FTconvlayer(_ConvNd):
     def forward(self, input: torch.Tensor):  # type: ignore[override]
         if self.hv_concat:
             conv_h = self.pseudo_forward(input, self.weights)
-            conv_v = self.pseudo_forward(input.permute(0, 1, 3, 2), self.weights).permute(0, 1, 3, 2)
+            conv_v = self.pseudo_forward(
+                input.permute(0, 1, 3, 2), self.weights
+            ).permute(0, 1, 3, 2)
             conv_stacked = torch.stack([conv_h, conv_v], dim=2)
             return conv_stacked.view(conv_h.size(0), -1, conv_h.size(2), conv_h.size(3))
         if self.vertical:
-            return self.pseudo_forward(input.permute(0, 1, 3, 2), self.weights).permute(0, 1, 3, 2)
-        return self.pseudo_forward(input, self.weights) 
+            return self.pseudo_forward(input.permute(0, 1, 3, 2), self.weights).permute(
+                0, 1, 3, 2
+            )
+        return self.pseudo_forward(input, self.weights)

@@ -133,7 +133,13 @@ class FFTConv2d(_ConvNd):
             th = min(tile_h, H_out - row_start)
             acc = input.new_zeros((N, C_out, th, W_out))
             for p in range(kH):
-                slice_p = x_p[:,:,row_start + p*self.dilation[0] : row_start + p*self.dilation[0] + th,:]
+                slice_start = row_start + p * self.dilation[0]
+                slice_p = x_p[
+                    :,
+                    :,
+                    slice_start : slice_start + th,
+                    :,
+                ]
                 batch_1d = slice_p.permute(0, 2, 1, 3).reshape(N * th, C_in, W_p)
                 w_p = weight[:, :, p, :]
                 seg_out = self.tiled_accelerator_conv1d(
@@ -159,9 +165,10 @@ class FFTConv2d(_ConvNd):
         N, C_in, L_in = input.shape
         C_out, _, kW = weight.shape
         dilated_k = (kW - 1) * self.dilation[0] + 1
-        assert self.hw_size >= dilated_k, (
-            f"Hardware size ({self.hw_size}) < kernel size ({dilated_k})"
-        )
+        if self.hw_size < dilated_k:
+            raise ValueError(
+                f"Hardware size ({self.hw_size}) < kernel size ({dilated_k})"
+            )
 
         pad_hw = self.hw_size - 1
         step = self.hw_size - (dilated_k - 1)
@@ -196,4 +203,3 @@ class FFTConv2d(_ConvNd):
         if self.bias is not None:
             out += self.bias.view(1, -1, 1)
         return out
-    

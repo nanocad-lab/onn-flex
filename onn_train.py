@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import yaml
-from typing import Tuple, Optional
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,10 @@ from onn_tests import run_pretrain_tests
 #  Utility helpers
 # -------------------------------
 
-def get_data_loaders(batch_size: int) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+
+def get_data_loaders(
+    batch_size: int,
+) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """Create CIFAR-10 train / test dataloaders with the same augmentation
     pipeline used in the original template."""
     stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
@@ -33,10 +36,12 @@ def get_data_loaders(batch_size: int) -> Tuple[torch.utils.data.DataLoader, torc
             transforms.Normalize(*stats, inplace=True),
         ]
     )
-    test_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(*stats),
-    ])
+    test_transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(*stats),
+        ]
+    )
 
     trainset = torchvision.datasets.CIFAR10(
         root="./data", train=True, download=True, transform=train_transform
@@ -58,6 +63,7 @@ def get_data_loaders(batch_size: int) -> Tuple[torch.utils.data.DataLoader, torc
 #  Model definition
 # -------------------------------
 
+
 class FFTConvNet(nn.Module):
     """Configurable variant of the 7-layer FFTConv network from `old_template.py`.
 
@@ -70,12 +76,16 @@ class FFTConvNet(nn.Module):
         sep = config.jtc_separation
 
         # Stem
-        self.conv1 = FTconvlayer(3, 8, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep)
+        self.conv1 = FTconvlayer(
+            3, 8, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep
+        )
         self.bn1 = nn.BatchNorm2d(16)
         self.maxpool1 = nn.MaxPool2d(2)
 
         # Second block (fixed)
-        self.conv2 = FTconvlayer(16, 16, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep)
+        self.conv2 = FTconvlayer(
+            16, 16, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep
+        )
         self.bn2 = nn.BatchNorm2d(32)
         self.maxpool2 = nn.MaxPool2d(2)
 
@@ -84,7 +94,14 @@ class FFTConvNet(nn.Module):
         for _ in range(config.num_identical_layers):
             blocks.append(
                 nn.Sequential(
-                    FTconvlayer(32, 16, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep),
+                    FTconvlayer(
+                        32,
+                        16,
+                        kernel_size=8,
+                        hv_concat=True,
+                        plane_size=plane_size,
+                        sep=sep,
+                    ),
                     nn.BatchNorm2d(32),
                     nn.ReLU(inplace=True),
                 )
@@ -118,13 +135,19 @@ class FFTConvNet(nn.Module):
 #  Training / evaluation helpers
 # -------------------------------
 
-def evaluate(model: nn.Module, dataloader: torch.utils.data.DataLoader, device: torch.device) -> float:
+
+def evaluate(
+    model: nn.Module, dataloader: torch.utils.data.DataLoader, device: torch.device
+) -> float:
     model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
         for images, labels in dataloader:
-            images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            images, labels = (
+                images.to(device, non_blocking=True),
+                labels.to(device, non_blocking=True),
+            )
             outputs = model(images)
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
@@ -132,7 +155,9 @@ def evaluate(model: nn.Module, dataloader: torch.utils.data.DataLoader, device: 
     return 100 * correct / total
 
 
-def save_checkpoint(model: nn.Module, config: AppConfig, best_acc: float, filename: str) -> None:
+def save_checkpoint(
+    model: nn.Module, config: AppConfig, best_acc: float, filename: str
+) -> None:
     """Save model state dict together with the config and accuracy."""
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     torch.save(
@@ -148,6 +173,7 @@ def save_checkpoint(model: nn.Module, config: AppConfig, best_acc: float, filena
 # -------------------------------
 #  Public API
 # -------------------------------
+
 
 def train_onn_model(config: AppConfig):
     """Entry-point used by `onn_main.py`.
@@ -189,9 +215,12 @@ def train_onn_model(config: AppConfig):
     for epoch in range(config.num_epochs):
         model.train()
         running_loss = 0.0
-        pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{config.num_epochs-1}")
+        pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{config.num_epochs - 1}")
         for inputs, labels in pbar:
-            inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            inputs, labels = (
+                inputs.to(device, non_blocking=True),
+                labels.to(device, non_blocking=True),
+            )
 
             optimizer.zero_grad()
             outputs = model(inputs)
@@ -214,7 +243,7 @@ def train_onn_model(config: AppConfig):
                 "train_acc": f"{train_acc:.2f}",
                 "test_acc": f"{test_acc:.2f}",
                 "best_acc": f"{best_acc:.2f}",
-                "loss": f"{running_loss/len(trainloader):.3f}",
+                "loss": f"{running_loss / len(trainloader):.3f}",
             }
         )
 
@@ -228,6 +257,6 @@ def train_onn_model(config: AppConfig):
     with open(os.path.join(config.output_dir, "final_config.yaml"), "w") as f:
         yaml.dump(vars(config), f)
 
-    print(f"Training finished. Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}.")
-
-    
+    print(
+        f"Training finished. Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
+    )
