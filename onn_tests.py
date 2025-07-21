@@ -89,7 +89,8 @@ def _sweep_and_plot(
     poly_coeff = get_coeffs(csv_path, degree)
     y_poly = np.polyval(poly_coeff, x)
 
-    plot_path = os.path.join(output_dir, f"{tag}_fit.png")
+    # Save as PDF rather than PNG
+    plot_path = os.path.join(output_dir, f"{tag}_fit.pdf")
     _plot_fit(
         x,
         y,
@@ -152,22 +153,34 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     jps = jtc.post_output_distortion(jft)
     out = jtc.final_output(jps, N)
 
-    _plot_array(torch.abs(input_plane), "input plane", os.path.join(output_dir, "stage_input_plane.png"))
-    _plot_array(torch.abs(jft), "post fft", os.path.join(output_dir, "stage_post_fft.png"))
-    _plot_array(jps, "post output distortion", os.path.join(output_dir, "stage_post_output.png"))
-
+    # --- Combine stage plots into a single multi-panel PDF ---
     conv_out = torch.nn.functional.conv1d(
         signal.view(1, 1, -1), kernel.view(1, 1, -1), padding=kernel.shape[0] // 2
     )[0, 0, : out.shape[0]]
 
-    plt.figure(figsize=(6, 4))
-    plt.plot(out.detach().cpu().numpy(), label="jtc")
-    plt.plot(conv_out.detach().cpu().numpy(), label="torch_conv")
-    plt.title("final output comparison")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "stage_final_comparison.png"))
-    plt.close()
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+
+    # Top-left: Input plane magnitude
+    axes[0, 0].plot(torch.abs(input_plane).detach().cpu().numpy())
+    axes[0, 0].set_title("Input plane")
+
+    # Top-right: After FFT magnitude
+    axes[0, 1].plot(torch.abs(jft).detach().cpu().numpy())
+    axes[0, 1].set_title("Post FFT")
+
+    # Bottom-left: After output distortion
+    axes[1, 0].plot(jps.detach().cpu().numpy())
+    axes[1, 0].set_title("Post output distortion")
+
+    # Bottom-right: Final output vs. PyTorch conv reference
+    axes[1, 1].plot(out.detach().cpu().numpy(), label="jtc")
+    axes[1, 1].plot(conv_out.detach().cpu().numpy(), label="torch_conv")
+    axes[1, 1].set_title("Final output comparison")
+    axes[1, 1].legend()
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, "stage_plots.pdf"))
+    plt.close(fig)
 
 
 def run_pretrain_tests(config: AppConfig) -> None:
@@ -204,7 +217,7 @@ def run_pretrain_tests(config: AppConfig) -> None:
 
     # Quick JTC sanity check and stage plots
     try:
-        _range_check_jtc(config, config.output_dir)
         _stage_plots_jtc(config, config.output_dir)
+        _range_check_jtc(config, config.output_dir)
     except Exception as e:
         print(f"[ERROR] JTC range check failed: {e}")
