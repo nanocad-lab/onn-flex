@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from onn_config import AppConfig
-from onn_component import get_ideal_degree, get_coeffs, Driver, PD_TIA, MRM, JTC
+from onn_component import get_ideal_degree, get_coeffs, JTC
 
 
 def _plot_fit(
@@ -106,9 +106,6 @@ def _sweep_and_plot(
 def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
     """Run a quick JTC forward pass to ensure outputs are finite and within a sensible range."""
     # Make dummy components (using CSV-driven poly fits)
-    driver = Driver(config)
-    pd_tia = PD_TIA(config)
-    mrm = MRM(config)
     jtc = JTC(config)
 
     # Random batch of signals/kernels in [-1, 1]
@@ -138,9 +135,6 @@ def _plot_array(arr: torch.Tensor, title: str, save_path: str) -> None:
 
 def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     """Plot intermediate JTC stages and compare with PyTorch conv."""
-    driver = Driver(config)
-    pd_tia = PD_TIA(config)
-    mrm = MRM(config)
     jtc = JTC(config)
 
     torch.manual_seed(1)
