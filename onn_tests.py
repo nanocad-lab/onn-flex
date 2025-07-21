@@ -89,7 +89,8 @@ def _sweep_and_plot(
     poly_coeff = get_coeffs(csv_path, degree)
     y_poly = np.polyval(poly_coeff, x)
 
-    plot_path = os.path.join(output_dir, f"{tag}_fit.png")
+    # Save as PDF rather than PNG
+    plot_path = os.path.join(output_dir, f"{tag}_fit.pdf")
     _plot_fit(
         x,
         y,
@@ -126,6 +127,62 @@ def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
     np.save(os.path.join(output_dir, "jtc_test_output.npy"), out.cpu().numpy())
 
 
+def _plot_array(arr: torch.Tensor, title: str, save_path: str) -> None:
+    plt.figure(figsize=(6, 4))
+    arr_np = arr.detach().cpu().numpy()
+    plt.plot(arr_np)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+
+def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
+    """Plot intermediate JTC stages and compare with PyTorch conv."""
+    driver = Driver(config)
+    pd_tia = PD_TIA(config)
+    mrm = MRM(config)
+    jtc = JTC(config, driver, mrm, pd_tia)
+
+    torch.manual_seed(1)
+    signal = torch.rand(8)
+    kernel = torch.rand(8)
+
+    input_plane, _, N = jtc.generate_input_plane(signal, kernel)
+    jft = jtc.post_fft(input_plane)
+    jps = jtc.post_output_distortion(jft)
+    out = jtc.final_output(jps, N)
+
+    # --- Combine stage plots into a single multi-panel PDF ---
+    conv_out = torch.nn.functional.conv1d(
+        signal.view(1, 1, -1), kernel.view(1, 1, -1), padding=kernel.shape[0] // 2
+    )[0, 0, : out.shape[0]]
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+
+    # Top-left: Input plane magnitude
+    axes[0, 0].plot(torch.abs(input_plane).detach().cpu().numpy())
+    axes[0, 0].set_title("Input plane")
+
+    # Top-right: After FFT magnitude
+    axes[0, 1].plot(torch.abs(jft).detach().cpu().numpy())
+    axes[0, 1].set_title("Post FFT")
+
+    # Bottom-left: After output distortion
+    axes[1, 0].plot(jps.detach().cpu().numpy())
+    axes[1, 0].set_title("Post output distortion")
+
+    # Bottom-right: Final output vs. PyTorch conv reference
+    axes[1, 1].plot(out.detach().cpu().numpy(), label="jtc")
+    axes[1, 1].plot(conv_out.detach().cpu().numpy(), label="torch_conv")
+    axes[1, 1].set_title("Final output comparison")
+    axes[1, 1].legend()
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, "stage_plots.pdf"))
+    plt.close(fig)
+
+
 def run_pretrain_tests(config: AppConfig) -> None:
     """Generate plots + basic checks before starting (or instead of) training."""
     os.makedirs(config.output_dir, exist_ok=True)
@@ -158,8 +215,9 @@ def run_pretrain_tests(config: AppConfig) -> None:
         deg = config.mrm_phase_polyfit_order or get_ideal_degree(config.mrm_phase_data_path)
         _sweep_and_plot(config.mrm_phase_data_path, deg, config.output_dir, "mrm_phase")
 
-    # Quick JTC sanity check
+    # Quick JTC sanity check and stage plots
     try:
+        _stage_plots_jtc(config, config.output_dir)
         _range_check_jtc(config, config.output_dir)
     except Exception as e:
-        print(f"[ERROR] JTC range check failed: {e}") 
+        print(f"[ERROR] JTC range check failed: {e}")
