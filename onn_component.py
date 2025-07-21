@@ -273,6 +273,9 @@ class JTC(nn.Module):
         B = signal.shape[0]
         M = signal.shape[-1]
         N = kernel.shape[-1]
+        # signal/kernel shapes are Bx32, 8
+        # print(f"signal shape: {signal.shape}")
+        # print(f"kernel shape: {kernel.shape}")
 
         if M > self.jtc_half_size:
             raise ValueError("Signal length is greater than JTC half size")
@@ -332,6 +335,10 @@ class JTC(nn.Module):
         return output_plane[:, same_indices]
 
     def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        # signal B H 1 W
+        # kernel Cout W
+        # print(f" JTC signal shape: {signal.shape}")
+        # print(f" JTC kernel shape: {kernel.shape}")
         N = signal.shape[-1]
         signal_full = signal.repeat(1, 1, kernel.shape[0], 1)
         kernel_full = kernel.repeat(signal.shape[0], signal.shape[1], 1, 1)
