@@ -109,7 +109,7 @@ def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
     driver = Driver(config)
     pd_tia = PD_TIA(config)
     mrm = MRM(config)
-    jtc = JTC(config, driver, mrm, pd_tia)
+    jtc = JTC(config)
 
     # Random batch of signals/kernels in [-1, 1]
     torch.manual_seed(0)
@@ -141,7 +141,7 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     driver = Driver(config)
     pd_tia = PD_TIA(config)
     mrm = MRM(config)
-    jtc = JTC(config, driver, mrm, pd_tia)
+    jtc = JTC(config)
 
     torch.manual_seed(1)
     signal = torch.rand(8)
