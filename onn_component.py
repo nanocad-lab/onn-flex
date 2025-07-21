@@ -9,6 +9,7 @@ from sklearn.metrics import r2_score
 
 # NEW: Helper functions to compute ideal (reference) transfer function coefficients
 
+
 def _compute_linear_coeffs(csv_file: str):
     """Compute coefficients a, b for y = a * x + b using first and last data points."""
     data = pd.read_csv(csv_file)
@@ -38,10 +39,12 @@ def _compute_quadratic_coeffs(csv_file: str):
     y_sorted = y[sort_idx]
     x_first, x_last = x_sorted[0], x_sorted[-1]
     y_first, y_last = y_sorted[0], y_sorted[-1]
-    if x_last ** 2 == x_first ** 2:
-        raise ValueError("Input points for ideal quadratic interpolation are identical.")
-    a = (y_last - y_first) / (x_last ** 2 - x_first ** 2)
-    b = y_first - a * x_first ** 2
+    if x_last**2 == x_first**2:
+        raise ValueError(
+            "Input points for ideal quadratic interpolation are identical."
+        )
+    a = (y_last - y_first) / (x_last**2 - x_first**2)
+    b = y_first - a * x_first**2
     return np.array([a, b], dtype=np.float32)
 
 
@@ -111,7 +114,9 @@ class Driver(nn.Module):
 
         # Ideal (reference) linear coefficients a, b where y = a * x + b
         ideal_coeffs = _compute_linear_coeffs(self.config.driver_distortion_data_path)
-        self.register_buffer("ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32))
+        self.register_buffer(
+            "ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32)
+        )
 
         # Distortion strength (0 -> ideal, 1 -> fitted polynomial)
         self.strength: float = float(self.config.driver_distortion_strength)
@@ -145,8 +150,12 @@ class PD_TIA(nn.Module):
         self.register_buffer("coeffs", coeff_tensor)
 
         # Ideal (reference) quadratic coefficients a, b where y = a * x**2 + b
-        ideal_coeffs = _compute_quadratic_coeffs(self.config.pd_tia_distortion_data_path)
-        self.register_buffer("ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32))
+        ideal_coeffs = _compute_quadratic_coeffs(
+            self.config.pd_tia_distortion_data_path
+        )
+        self.register_buffer(
+            "ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32)
+        )
 
         # Distortion strength
         self.strength: float = float(self.config.pd_tia_distortion_strength)
@@ -181,7 +190,9 @@ class MRM(nn.Module):
 
         # Ideal power coefficients (linear)
         ideal_pwr_coeffs = _compute_linear_coeffs(self.config.mrm_power_data_path)
-        self.register_buffer("ideal_pwr_coeffs", torch.as_tensor(ideal_pwr_coeffs, dtype=torch.float32))
+        self.register_buffer(
+            "ideal_pwr_coeffs", torch.as_tensor(ideal_pwr_coeffs, dtype=torch.float32)
+        )
 
         # Distortion strength for power
         self.pwr_strength: float = float(self.config.mrm_power_distortion_strength)
@@ -197,7 +208,10 @@ class MRM(nn.Module):
 
         # Ideal phase coefficients (linear)
         ideal_phase_coeffs = _compute_linear_coeffs(self.config.mrm_phase_data_path)
-        self.register_buffer("ideal_phase_coeffs", torch.as_tensor(ideal_phase_coeffs, dtype=torch.float32))
+        self.register_buffer(
+            "ideal_phase_coeffs",
+            torch.as_tensor(ideal_phase_coeffs, dtype=torch.float32),
+        )
 
         # Distortion strength for phase
         self.phase_strength: float = float(self.config.mrm_phase_distortion_strength)
@@ -221,7 +235,10 @@ class MRM(nn.Module):
         # Ideal linear response for phase
         phase_ideal_y = self.ideal_phase_coeffs[0] * x + self.ideal_phase_coeffs[1]
 
-        phase_y = self.phase_strength * phase_poly_y + (1.0 - self.phase_strength) * phase_ideal_y
+        phase_y = (
+            self.phase_strength * phase_poly_y
+            + (1.0 - self.phase_strength) * phase_ideal_y
+        )
 
         return torch.polar(pwr_y, phase_y)
 
