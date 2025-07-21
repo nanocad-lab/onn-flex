@@ -53,3 +53,4 @@ class AppConfig:
     batch_size: int = 128
     eval_only: bool = False
     pretrained_weights: str = ""
+    run_pretrain_tests: bool = True
