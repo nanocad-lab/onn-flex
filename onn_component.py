@@ -123,7 +123,7 @@ class Driver(nn.Module):
 
     def forward(self, x):
         # Polynomial evaluation using Horner's rule
-        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype)
+        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
             poly_y = poly_y * x + a
 
@@ -162,7 +162,7 @@ class PD_TIA(nn.Module):
 
     def forward(self, x):
         # Polynomial evaluation using Horner's rule
-        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype)
+        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
             poly_y = poly_y * x + a
 
@@ -218,7 +218,7 @@ class MRM(nn.Module):
 
     def forward(self, x):
         # Polynomial evaluation for power
-        pwr_poly_y = torch.zeros_like(x, dtype=self.pwr_coeffs.dtype)
+        pwr_poly_y = torch.zeros_like(x, dtype=self.pwr_coeffs.dtype, device=x.device)
         for a in self.pwr_coeffs:
             pwr_poly_y = pwr_poly_y * x + a
 
@@ -228,7 +228,9 @@ class MRM(nn.Module):
         pwr_y = self.pwr_strength * pwr_poly_y + (1.0 - self.pwr_strength) * pwr_ideal_y
 
         # Polynomial evaluation for phase
-        phase_poly_y = torch.zeros_like(x, dtype=self.phase_coeffs.dtype)
+        phase_poly_y = torch.zeros_like(
+            x, dtype=self.phase_coeffs.dtype, device=x.device
+        )
         for a in self.phase_coeffs:
             phase_poly_y = phase_poly_y * x + a
 
@@ -244,12 +246,12 @@ class MRM(nn.Module):
 
 
 class JTC(nn.Module):
-    def __init__(self, config: AppConfig, driver: Driver, mrm: MRM, pd_tia: PD_TIA):
+    def __init__(self, config: AppConfig):
         super(JTC, self).__init__()
         self.config = config
-        self.driver = driver
-        self.mrm = mrm
-        self.pd_tia = pd_tia
+        self.driver = Driver(config)
+        self.mrm = MRM(config)
+        self.pd_tia = PD_TIA(config)
 
         self.jtc_half_size = config.jtc_half_size
         self.jtc_separation = config.jtc_separation
@@ -268,8 +270,9 @@ class JTC(nn.Module):
         self, signal: torch.Tensor, kernel: torch.Tensor
     ) -> Tuple[torch.Tensor, int, int]:
         """Apply input distortion and build the JTC input plane."""
-        M = signal.shape[0]
-        N = kernel.shape[0]
+        B = signal.shape[0]
+        M = signal.shape[-1]
+        N = kernel.shape[-1]
 
         if M > self.jtc_half_size:
             raise ValueError("Signal length is greater than JTC half size")
@@ -287,11 +290,15 @@ class JTC(nn.Module):
         signal_start = kernel_end + self.jtc_separation
         signal_end = signal_start + M
 
-        input_plane = torch.zeros(self.jtc_total_field, dtype=torch.complex64)
-        input_plane[kernel_start:kernel_end] = kernel_distorted
-        input_plane[signal_start:signal_end] = signal_distorted
-
-        return input_plane, M, N
+        input_plane = torch.zeros(
+            B,
+            self.jtc_total_field,
+            dtype=torch.complex64,
+            device=kernel_distorted.device,
+        )
+        input_plane[:, kernel_start:kernel_end] = kernel_distorted
+        input_plane[:, signal_start:signal_end] = signal_distorted
+        return input_plane
 
     def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
         """Perform FFT and shift the result."""
@@ -305,7 +312,7 @@ class JTC(nn.Module):
         jps = jps / self.jtc_total_field  # fft normalization by L
         return jps
 
-    def final_output(self, jps: torch.Tensor, N: int) -> torch.Tensor:
+    def inverse_output(self, jps: torch.Tensor, N: int) -> torch.Tensor:
         """Propagate back to the detector plane and crop the result."""
         jps = self.input_distortion(jps)
 
@@ -318,13 +325,27 @@ class JTC(nn.Module):
             torch.arange(
                 self.jtc_total_field // 2 + self.jtc_separation + N // 2 + 1,
                 self.jtc_total_field // 2 + self.jtc_separation + N // 2 + 1 + 8,
+                device=jps.device,
             )
             % self.jtc_total_field
         )
-        return output_plane[same_indices]
+        return output_plane[:, same_indices]
 
     def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        input_plane, _, N = self.generate_input_plane(signal, kernel)
+        N = signal.shape[-1]
+        signal_full = signal.repeat(1, 1, kernel.shape[0], 1)
+        kernel_full = kernel.repeat(signal.shape[0], signal.shape[1], 1, 1)
+        batch_size_for_jtc = (
+            signal_full.shape[0] * signal_full.shape[1] * signal_full.shape[2]
+        )
+        signal_reshaped = signal_full.reshape(batch_size_for_jtc, 8)
+        kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, 8)
+        input_plane = self.generate_input_plane(signal_reshaped, kernel_reshaped)
         jft = self.post_fft(input_plane)
         jps = self.post_output_distortion(jft)
-        return self.final_output(jps, N)
+        inverse_output = self.inverse_output(jps, N)
+
+        output_reshaped = inverse_output.reshape(
+            signal_full.shape[0], signal_full.shape[1], signal_full.shape[2], 8
+        )
+        return output_reshaped

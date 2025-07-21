@@ -1,11 +1,12 @@
 import math
 import torch
-import torch.nn as nn
 from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
+from onn_config import AppConfig
+from onn_component import JTC
 
-__all__ = ["PIC", "FTconvlayer"]
+__all__ = ["FTconvlayer"]
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -16,6 +17,7 @@ def _check_8(x: int, name: str):
         raise ValueError(f"{name} length must be 8 for this implementation. Got {x}.")
 
 
+'''
 class PIC(nn.Module):
     """In–memory implementation of the joint transform correlator used in the
     original template. The interface is kept identical so that the training
@@ -93,6 +95,7 @@ class PIC(nn.Module):
             input_full.shape[0], input_full.shape[1], input_full.shape[2], 8
         )
         return output_reshaped
+'''
 
 
 class _ConvNd(Module):
@@ -167,6 +170,7 @@ class FTconvlayer(_ConvNd):
         self,
         in_channels: int,
         out_channels: int,
+        config: AppConfig,
         kernel_size: int = 8,
         batch_size: int = 128,
         stride: int = 1,
@@ -177,8 +181,6 @@ class FTconvlayer(_ConvNd):
         padding_mode: str = "zeros",
         vertical: bool = False,
         hv_concat: bool = False,
-        plane_size: int = 48,
-        sep: int = 8,
     ):
         super().__init__(
             in_channels,
@@ -196,7 +198,7 @@ class FTconvlayer(_ConvNd):
         )
         self.vertical = vertical
         self.hv_concat = hv_concat
-        self.PIC_CONV = PIC(plane_size, sep)
+        self.PIC_CONV = JTC(config)
 
     # ---------------- Internal helpers ------------------
     def hardware_forward(

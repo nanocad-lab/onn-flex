@@ -72,19 +72,25 @@ class FFTConvNet(nn.Module):
 
     def __init__(self, config: AppConfig):
         super().__init__()
-        plane_size = config.jtc_total_field
-        sep = config.jtc_separation
 
         # Stem
         self.conv1 = FTconvlayer(
-            3, 8, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep
+            3,
+            8,
+            config=config,
+            kernel_size=8,
+            hv_concat=True,
         )
         self.bn1 = nn.BatchNorm2d(16)
         self.maxpool1 = nn.MaxPool2d(2)
 
         # Second block (fixed)
         self.conv2 = FTconvlayer(
-            16, 16, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep
+            16,
+            16,
+            config=config,
+            kernel_size=8,
+            hv_concat=True,
         )
         self.bn2 = nn.BatchNorm2d(32)
         self.maxpool2 = nn.MaxPool2d(2)
@@ -97,10 +103,9 @@ class FFTConvNet(nn.Module):
                     FTconvlayer(
                         32,
                         16,
+                        config=config,
                         kernel_size=8,
                         hv_concat=True,
-                        plane_size=plane_size,
-                        sep=sep,
                     ),
                     nn.BatchNorm2d(32),
                     nn.ReLU(inplace=True),
