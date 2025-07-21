@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -188,12 +187,20 @@ def run_pretrain_tests(config: AppConfig) -> None:
     os.makedirs(config.output_dir, exist_ok=True)
 
     # Driver
-    if config.driver_distortion_data_path and os.path.exists(config.driver_distortion_data_path):
-        deg = config.driver_distortion_polyfit_order or get_ideal_degree(config.driver_distortion_data_path)
-        _sweep_and_plot(config.driver_distortion_data_path, deg, config.output_dir, "driver")
+    if config.driver_distortion_data_path and os.path.exists(
+        config.driver_distortion_data_path
+    ):
+        deg = config.driver_distortion_polyfit_order or get_ideal_degree(
+            config.driver_distortion_data_path
+        )
+        _sweep_and_plot(
+            config.driver_distortion_data_path, deg, config.output_dir, "driver"
+        )
 
     # PD/TIA (use 2nd-order reference instead of linear)
-    if config.pd_tia_distortion_data_path and os.path.exists(config.pd_tia_distortion_data_path):
+    if config.pd_tia_distortion_data_path and os.path.exists(
+        config.pd_tia_distortion_data_path
+    ):
         deg = config.pd_tia_distortion_polyfit_order or get_ideal_degree(
             config.pd_tia_distortion_data_path
         )
@@ -207,12 +214,16 @@ def run_pretrain_tests(config: AppConfig) -> None:
 
     # MRM power
     if config.mrm_power_data_path and os.path.exists(config.mrm_power_data_path):
-        deg = config.mrm_power_polyfit_order or get_ideal_degree(config.mrm_power_data_path)
+        deg = config.mrm_power_polyfit_order or get_ideal_degree(
+            config.mrm_power_data_path
+        )
         _sweep_and_plot(config.mrm_power_data_path, deg, config.output_dir, "mrm_power")
 
     # MRM phase
     if config.mrm_phase_data_path and os.path.exists(config.mrm_phase_data_path):
-        deg = config.mrm_phase_polyfit_order or get_ideal_degree(config.mrm_phase_data_path)
+        deg = config.mrm_phase_polyfit_order or get_ideal_degree(
+            config.mrm_phase_data_path
+        )
         _sweep_and_plot(config.mrm_phase_data_path, deg, config.output_dir, "mrm_phase")
 
     # Quick JTC sanity check and stage plots

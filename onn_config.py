@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+
 @dataclass
 class AppConfig:
     """Application configuration class."""
@@ -41,7 +42,7 @@ class AppConfig:
     mrm_phase_data_path: str = "./data/mrm_phase_data.csv"
     mrm_phase_polyfit_order: int = 3
 
-    conv_method: str = "patch" # "patch" or "dot_product" or "tile"
+    conv_method: str = "patch"  # "patch" or "dot_product" or "tile"
 
     # ------------------------------------------------------------------
     #  Training / model-related CLI overrides
