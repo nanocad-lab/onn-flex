@@ -299,8 +299,8 @@ class JTC(nn.Module):
             dtype=torch.complex64,
             device=kernel_distorted.device,
         )
-        input_plane[:, kernel_start:kernel_end] = kernel_distorted
-        input_plane[:, signal_start:signal_end] = signal_distorted
+        input_plane[..., kernel_start:kernel_end] = kernel_distorted
+        input_plane[..., signal_start:signal_end] = signal_distorted
         return input_plane
 
     def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
