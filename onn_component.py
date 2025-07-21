@@ -345,14 +345,17 @@ class JTC(nn.Module):
         batch_size_for_jtc = (
             signal_full.shape[0] * signal_full.shape[1] * signal_full.shape[2]
         )
-        signal_reshaped = signal_full.reshape(batch_size_for_jtc, 8)
-        kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, 8)
+        signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.jtc_half_size)
+        kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.jtc_half_size)
         input_plane = self.generate_input_plane(signal_reshaped, kernel_reshaped)
         jft = self.post_fft(input_plane)
         jps = self.post_output_distortion(jft)
         inverse_output = self.inverse_output(jps, N)
 
         output_reshaped = inverse_output.reshape(
-            signal_full.shape[0], signal_full.shape[1], signal_full.shape[2], 8
+            signal_full.shape[0],
+            signal_full.shape[1],
+            signal_full.shape[2],
+            self.jtc_half_size,
         )
         return output_reshaped
