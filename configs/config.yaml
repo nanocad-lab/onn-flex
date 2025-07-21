@@ -21,6 +21,7 @@ pd_tia_distortion_strength: 0.0
 num_identical_layers: 1
 num_epochs: 20
 learning_rate: 1e-3
-batch_size: 128
+batch_size: 32
 eval_only: False
 pretrained_weights: ""
+run_pretrain_tests: True

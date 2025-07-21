@@ -250,6 +250,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.pretrained_weights,
         help="Path to pretrained weights (.pth) for evaluation or resume",
     )
+    parser.add_argument(
+        "--run-pretrain-tests",
+        dest="run_pretrain_tests",
+        type=bool,
+        default=yaml_config.run_pretrain_tests,
+        help="Run pretrain tests",
+    )
 
     args = parser.parse_args()
 
