@@ -7,6 +7,43 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
 
+# NEW: Helper functions to compute ideal (reference) transfer function coefficients
+
+def _compute_linear_coeffs(csv_file: str):
+    """Compute coefficients a, b for y = a * x + b using first and last data points."""
+    data = pd.read_csv(csv_file)
+    x = data["input"].values
+    y = data["output"].values
+    # Sort by x to get true first and last in domain
+    sort_idx = np.argsort(x)
+    x_sorted = x[sort_idx]
+    y_sorted = y[sort_idx]
+    x_first, x_last = x_sorted[0], x_sorted[-1]
+    y_first, y_last = y_sorted[0], y_sorted[-1]
+    if x_last == x_first:
+        raise ValueError("Input points for ideal linear interpolation are identical.")
+    a = (y_last - y_first) / (x_last - x_first)
+    b = y_first - a * x_first
+    return np.array([a, b], dtype=np.float32)
+
+
+def _compute_quadratic_coeffs(csv_file: str):
+    """Compute coefficients a, b for y = a * x**2 + b using first and last data points."""
+    data = pd.read_csv(csv_file)
+    x = data["input"].values
+    y = data["output"].values
+    # Sort by x to get true first and last in domain
+    sort_idx = np.argsort(x)
+    x_sorted = x[sort_idx]
+    y_sorted = y[sort_idx]
+    x_first, x_last = x_sorted[0], x_sorted[-1]
+    y_first, y_last = y_sorted[0], y_sorted[-1]
+    if x_last ** 2 == x_first ** 2:
+        raise ValueError("Input points for ideal quadratic interpolation are identical.")
+    a = (y_last - y_first) / (x_last ** 2 - x_first ** 2)
+    b = y_first - a * x_first ** 2
+    return np.array([a, b], dtype=np.float32)
+
 
 def calculate_aic(y_true, y_pred, n_params):
     """Calculate AIC for polynomial regression"""
@@ -72,11 +109,24 @@ class Driver(nn.Module):
         coeff_tensor = torch.as_tensor(coeffs, dtype=torch.float32)
         self.register_buffer("coeffs", coeff_tensor)
 
+        # Ideal (reference) linear coefficients a, b where y = a * x + b
+        ideal_coeffs = _compute_linear_coeffs(self.config.driver_distortion_data_path)
+        self.register_buffer("ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32))
+
+        # Distortion strength (0 -> ideal, 1 -> fitted polynomial)
+        self.strength: float = float(self.config.driver_distortion_strength)
+
     def forward(self, x):
-        y = torch.zeros_like(x, dtype=self.coeffs.dtype)
+        # Polynomial evaluation using Horner's rule
+        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype)
         for a in self.coeffs:
-            y = y * x + a
-        return y
+            poly_y = poly_y * x + a
+
+        # Ideal linear response
+        ideal_y = self.ideal_coeffs[0] * x + self.ideal_coeffs[1]
+
+        # Blend based on strength
+        return self.strength * poly_y + (1.0 - self.strength) * ideal_y
 
 
 class PD_TIA(nn.Module):
@@ -94,11 +144,23 @@ class PD_TIA(nn.Module):
         coeff_tensor = torch.as_tensor(coeffs, dtype=torch.float32)
         self.register_buffer("coeffs", coeff_tensor)
 
+        # Ideal (reference) quadratic coefficients a, b where y = a * x**2 + b
+        ideal_coeffs = _compute_quadratic_coeffs(self.config.pd_tia_distortion_data_path)
+        self.register_buffer("ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32))
+
+        # Distortion strength
+        self.strength: float = float(self.config.pd_tia_distortion_strength)
+
     def forward(self, x):
-        y = torch.zeros_like(x, dtype=self.coeffs.dtype)
+        # Polynomial evaluation using Horner's rule
+        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype)
         for a in self.coeffs:
-            y = y * x + a
-        return y
+            poly_y = poly_y * x + a
+
+        # Ideal quadratic response
+        ideal_y = self.ideal_coeffs[0] * torch.pow(x, 2) + self.ideal_coeffs[1]
+
+        return self.strength * poly_y + (1.0 - self.strength) * ideal_y
 
 
 class MRM(nn.Module):
@@ -116,6 +178,13 @@ class MRM(nn.Module):
         pwr_coeffs = get_coeffs(self.config.mrm_power_data_path, self.pwr_degree)
         pwr_coeff_tensor = torch.as_tensor(pwr_coeffs, dtype=torch.float32)
         self.register_buffer("pwr_coeffs", pwr_coeff_tensor)
+
+        # Ideal power coefficients (linear)
+        ideal_pwr_coeffs = _compute_linear_coeffs(self.config.mrm_power_data_path)
+        self.register_buffer("ideal_pwr_coeffs", torch.as_tensor(ideal_pwr_coeffs, dtype=torch.float32))
+
+        # Distortion strength for power
+        self.pwr_strength: float = float(self.config.mrm_power_distortion_strength)
         if self.config.mrm_phase_data_path is None:
             raise ValueError("MRM phase data path is not set")
         if self.config.mrm_phase_polyfit_order is None:
@@ -126,13 +195,34 @@ class MRM(nn.Module):
         phase_coeff_tensor = torch.as_tensor(phase_coeffs, dtype=torch.float32)
         self.register_buffer("phase_coeffs", phase_coeff_tensor)
 
+        # Ideal phase coefficients (linear)
+        ideal_phase_coeffs = _compute_linear_coeffs(self.config.mrm_phase_data_path)
+        self.register_buffer("ideal_phase_coeffs", torch.as_tensor(ideal_phase_coeffs, dtype=torch.float32))
+
+        # Distortion strength for phase
+        self.phase_strength: float = float(self.config.mrm_phase_distortion_strength)
+
     def forward(self, x):
-        pwr_y = torch.zeros_like(x, dtype=self.pwr_coeffs.dtype)
+        # Polynomial evaluation for power
+        pwr_poly_y = torch.zeros_like(x, dtype=self.pwr_coeffs.dtype)
         for a in self.pwr_coeffs:
-            pwr_y = pwr_y * x + a
-        phase_y = torch.zeros_like(x, dtype=self.phase_coeffs.dtype)
+            pwr_poly_y = pwr_poly_y * x + a
+
+        # Ideal linear response for power
+        pwr_ideal_y = self.ideal_pwr_coeffs[0] * x + self.ideal_pwr_coeffs[1]
+
+        pwr_y = self.pwr_strength * pwr_poly_y + (1.0 - self.pwr_strength) * pwr_ideal_y
+
+        # Polynomial evaluation for phase
+        phase_poly_y = torch.zeros_like(x, dtype=self.phase_coeffs.dtype)
         for a in self.phase_coeffs:
-            phase_y = phase_y * x + a
+            phase_poly_y = phase_poly_y * x + a
+
+        # Ideal linear response for phase
+        phase_ideal_y = self.ideal_phase_coeffs[0] * x + self.ideal_phase_coeffs[1]
+
+        phase_y = self.phase_strength * phase_poly_y + (1.0 - self.phase_strength) * phase_ideal_y
+
         return torch.polar(pwr_y, phase_y)
 
 
