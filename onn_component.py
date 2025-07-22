@@ -92,7 +92,7 @@ def get_ideal_degree(csv_file, max_degree: int = 10):
         r2 = r2_score(y, y_pred)
         n_params = degree + 1  # coefficients + intercept
         aic = calculate_aic(y, y_pred, n_params)
-        print(f"degree: {degree}, r2: {r2}, aic: {aic}")
+        # print(f"degree: {degree}, r2: {r2}, aic: {aic}")
         if r2 > 0.9995:
             return degree
         elif aic > last_aic:
@@ -137,15 +137,21 @@ class Driver(nn.Module):
 
     def forward(self, x):
         # Polynomial evaluation using Horner's rule
+        # print(f"x shape: {x.shape}")
+        # print(f"x: {x[0]}")
         poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
             poly_y = poly_y * x + a
 
         # Ideal linear response
         ideal_y = self.ideal_coeffs[0] * x + self.ideal_coeffs[1]
-
         # Blend based on strength
-        return self.strength * poly_y + (1.0 - self.strength) * ideal_y
+        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
+        # print(f"ideal_y_shape: {ideal_y.shape}")
+        # print(f"ideal_y: {ideal_y[0]}")
+        # print(f"poly_y: {poly_y[0]}")
+        # input("Press Enter to continue...")
+        return combined_y
 
 
 class PD_TIA(nn.Module):
@@ -176,6 +182,10 @@ class PD_TIA(nn.Module):
 
     def forward(self, x):
         # Polynomial evaluation using Horner's rule
+        x = torch.clamp(x, 1e-6, 1e-5)
+        # print(f"pd_tia x shape: {x.shape}")
+        # print(f"pd_tia x: {x[0]}")
+        # input("Press Enter to continue...")
         poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
             poly_y = poly_y * x + a
@@ -183,7 +193,13 @@ class PD_TIA(nn.Module):
         # Ideal quadratic response
         ideal_y = self.ideal_coeffs[0] * torch.pow(x, 2) + self.ideal_coeffs[1]
 
-        return self.strength * poly_y + (1.0 - self.strength) * ideal_y
+        # print(f"ideal_y_shape: {ideal_y.shape}")
+        # print(f"ideal_y: {ideal_y[0]}")
+        # print(f"poly_y: {poly_y[0]}")
+        # input("Press Enter to continue...")
+
+        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
+        return combined_y
 
 
 class MRM(nn.Module):
@@ -263,6 +279,7 @@ class JTC(nn.Module):
         self.jtc_half_size = config.jtc_half_size
         self.jtc_separation = config.jtc_separation
         self.jtc_total_field = config.jtc_total_field
+        self.loss = 0.9660508789898133 # loss as gain
 
     def input_distortion(self, x):
         x = QuantDequant_STE.apply(x, self.config.dac_bits)
@@ -271,6 +288,7 @@ class JTC(nn.Module):
         return x
 
     def output_distortion(self, x):
+        x = x * self.loss
         x = self.pd_tia(x)
         x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
@@ -320,8 +338,7 @@ class JTC(nn.Module):
 
     def post_output_distortion(self, jft: torch.Tensor) -> torch.Tensor:
         """Apply output distortion after the Fourier plane."""
-        jps = self.output_distortion(torch.abs(jft) ** 2)
-        jps = jps / self.jtc_total_field  # fft normalization by L
+        jps = self.output_distortion(torch.abs(jft))
         return jps
 
     def inverse_output(self, jps: torch.Tensor, N: int) -> torch.Tensor:
@@ -335,20 +352,20 @@ class JTC(nn.Module):
 
         same_indices = (
             torch.arange(
-                self.jtc_total_field // 2 + self.jtc_separation + N // 2 + 1,
-                self.jtc_total_field // 2 + self.jtc_separation + N // 2 + 1 + 8,
+                self.jtc_total_field // 2 + self.jtc_separation + self.jtc_half_size // 2 + 1,
+                self.jtc_total_field // 2 + self.jtc_separation + self.jtc_half_size // 2 + 1 + self.jtc_half_size,
                 device=jps.device,
             )
             % self.jtc_total_field
         )
-        return output_plane[:, same_indices]
+        output_slice = output_plane[..., same_indices]
+        return output_slice
 
     def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         # signal B H 1 W
         # kernel Cout W
         # print(f" JTC signal shape: {signal.shape}")
         # print(f" JTC kernel shape: {kernel.shape}")
-        N = signal.shape[-1]
         signal_full = signal.repeat(1, 1, kernel.shape[0], 1)
         kernel_full = kernel.repeat(signal.shape[0], signal.shape[1], 1, 1)
         batch_size_for_jtc = (
@@ -359,7 +376,11 @@ class JTC(nn.Module):
         input_plane = self.generate_input_plane(signal_reshaped, kernel_reshaped)
         jft = self.post_fft(input_plane)
         jps = self.post_output_distortion(jft)
-        inverse_output = self.inverse_output(jps, N)
+        # print(f"jps shape: ", jps.shape)
+        # print("jps: ", jps[..., :8])
+        # print(f"max: {jps.max()}, min: {jps.min()}")
+        # input("Press Enter to continue...")
+        inverse_output = self.inverse_output(jps, self.jtc_half_size)
 
         output_reshaped = inverse_output.reshape(
             signal_full.shape[0],

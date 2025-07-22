@@ -6,6 +6,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
@@ -51,10 +52,10 @@ def get_data_loaders(
     )
 
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True
+        trainset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True
+        testset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True
     )
     return trainloader, testloader
 
@@ -107,7 +108,6 @@ class FFTConvNet(nn.Module):
                         kernel_size=8,
                         hv_concat=True,
                     ),
-                    nn.BatchNorm2d(32),
                     nn.ReLU(inplace=True),
                 )
             )
@@ -124,14 +124,16 @@ class FFTConvNet(nn.Module):
     # pylint: disable=arguments-differ
     def forward(self, x):  # type: ignore[override]
         x = self.conv1(x)
-        x = self.bn1(x)
         x = self.maxpool1(x)
+        x = F.relu(x)
+        x = x / x.max()
 
         x = self.conv2(x)
-        x = self.bn2(x)
         x = self.maxpool2(x)
+        x = F.relu(x)
+        x = x / x.max()
 
-        x = self.blocks(x)
+        #x = self.blocks(x)
         x = self.classifier(x)
         return x
 
