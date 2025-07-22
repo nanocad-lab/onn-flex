@@ -79,7 +79,8 @@ def get_ideal_degree(csv_file, max_degree: int = 10):
         r2 = r2_score(y, y_pred)
         n_params = degree + 1  # coefficients + intercept
         aic = calculate_aic(y, y_pred, n_params)
-        if r2 > 0.999:
+        print(f"degree: {degree}, r2: {r2}, aic: {aic}")
+        if r2 > 0.9995:
             return degree
         elif aic > last_aic:
             return degree - 1
@@ -206,13 +207,6 @@ class MRM(nn.Module):
         phase_coeff_tensor = torch.as_tensor(phase_coeffs, dtype=torch.float32)
         self.register_buffer("phase_coeffs", phase_coeff_tensor)
 
-        # Ideal phase coefficients (linear)
-        ideal_phase_coeffs = _compute_linear_coeffs(self.config.mrm_phase_data_path)
-        self.register_buffer(
-            "ideal_phase_coeffs",
-            torch.as_tensor(ideal_phase_coeffs, dtype=torch.float32),
-        )
-
         # Distortion strength for phase
         self.phase_strength: float = float(self.config.mrm_phase_distortion_strength)
 
@@ -235,7 +229,7 @@ class MRM(nn.Module):
             phase_poly_y = phase_poly_y * x + a
 
         # Ideal linear response for phase
-        phase_ideal_y = self.ideal_phase_coeffs[0] * x + self.ideal_phase_coeffs[1]
+        phase_ideal_y = torch.zeros_like(x, device=x.device)
 
         phase_y = (
             self.phase_strength * phase_poly_y
