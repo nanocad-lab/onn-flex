@@ -26,20 +26,20 @@ def get_data_loaders(
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """Create CIFAR-10 train / test dataloaders with the same augmentation
     pipeline used in the original template."""
-    stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    # stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
 
     train_transform = transforms.Compose(
         [
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
             transforms.ToTensor(),
-            transforms.Normalize(*stats, inplace=True),
+            # transforms.Normalize(*stats, inplace=True),
         ]
     )
     test_transform = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(*stats),
+            # transforms.Normalize(*stats),
         ]
     )
 

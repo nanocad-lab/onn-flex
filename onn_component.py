@@ -9,6 +9,17 @@ from sklearn.metrics import r2_score
 
 # NEW: Helper functions to compute ideal (reference) transfer function coefficients
 
+class QuantDequant_STE(torch.autograd.Function):
+    # version of the MRR LUT but implemented with straight-thourgh estimator to help training
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, bits: int) -> torch.Tensor:
+        levels = 2**bits
+        input_clamped = torch.clamp(input, 0, 1)
+        return torch.round(input_clamped * (levels - 1)) / (levels - 1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
 
 def _compute_linear_coeffs(csv_file: str):
     """Compute coefficients a, b for y = a * x + b using first and last data points."""
@@ -252,12 +263,14 @@ class JTC(nn.Module):
         self.jtc_total_field = config.jtc_total_field
 
     def input_distortion(self, x):
+        x = QuantDequant_STE.apply(x, self.config.dac_bits)
         x = self.driver(x)
         x = self.mrm(x)
         return x
 
     def output_distortion(self, x):
         x = self.pd_tia(x)
+        x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
 
     def generate_input_plane(
