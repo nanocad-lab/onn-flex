@@ -199,6 +199,80 @@ class PD_TIA(nn.Module):
         # input("Press Enter to continue...")
 
         combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
+        combined_y = torch.clamp(combined_y, 0, 1)
+        return combined_y
+
+
+class PD(nn.Module):
+    def __init__(self, config: AppConfig):
+        super().__init__()
+        self.config = config
+        self.degree: int = 0
+        if self.config.pd_distortion_data_path is None:
+            raise ValueError("PD distortion data path is not set")
+        if self.config.pd_distortion_polyfit_order is None:
+            self.degree = get_ideal_degree(self.config.pd_distortion_data_path)
+        else:
+            self.degree = self.config.pd_distortion_polyfit_order
+        coeffs = get_coeffs(self.config.pd_distortion_data_path, self.degree)
+        coeff_tensor = torch.as_tensor(coeffs, dtype=torch.float32)
+        self.register_buffer("coeffs", coeff_tensor)
+
+        # Ideal (reference) quadratic coefficients a, b where y = a * x**2 + b
+        ideal_coeffs = _compute_quadratic_coeffs(
+            self.config.pd_distortion_data_path
+        )
+        self.register_buffer(
+            "ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32)
+        )
+
+        # Distortion strength
+        self.strength: float = float(self.config.pd_distortion_strength)
+
+    def forward(self, x):
+        x = torch.clamp(x, 1e-6, 1e-5)
+        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
+        for a in self.coeffs:
+            poly_y = poly_y * x + a
+
+        ideal_y = self.ideal_coeffs[0] * torch.pow(x, 2) + self.ideal_coeffs[1]
+        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
+        combined_y = torch.clamp(combined_y, 0, 1)
+        return combined_y
+
+
+class TIA(nn.Module):
+    def __init__(self, config: AppConfig):
+        super().__init__()
+        self.config = config
+        self.degree: int = 0
+        if self.config.tia_distortion_data_path is None:
+            raise ValueError("TIA distortion data path is not set")
+        if self.config.tia_distortion_polyfit_order is None:
+            self.degree = get_ideal_degree(self.config.tia_distortion_data_path)
+        else:
+            self.degree = self.config.tia_distortion_polyfit_order
+        coeffs = get_coeffs(self.config.tia_distortion_data_path, self.degree)
+        coeff_tensor = torch.as_tensor(coeffs, dtype=torch.float32)
+        self.register_buffer("coeffs", coeff_tensor)
+
+        # Ideal (reference) linear coefficients a, b where y = a * x + b
+        ideal_coeffs = _compute_linear_coeffs(self.config.tia_distortion_data_path)
+        self.register_buffer(
+            "ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32)
+        )
+
+        # Distortion strength
+        self.strength: float = float(self.config.tia_distortion_strength)
+
+    def forward(self, x):
+        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
+        for a in self.coeffs:
+            poly_y = poly_y * x + a
+
+        ideal_y = self.ideal_coeffs[0] * x + self.ideal_coeffs[1]
+        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
+        combined_y = torch.clamp(combined_y, 0, 1)
         return combined_y
 
 
@@ -257,13 +331,7 @@ class MRM(nn.Module):
         for a in self.phase_coeffs:
             phase_poly_y = phase_poly_y * x + a
 
-        # Ideal linear response for phase
-        phase_ideal_y = torch.zeros_like(x, device=x.device)
-
-        phase_y = (
-            self.phase_strength * phase_poly_y
-            + (1.0 - self.phase_strength) * phase_ideal_y
-        )
+        phase_y = self.phase_strength * phase_poly_y
 
         return torch.polar(pwr_y, phase_y)
 
@@ -279,7 +347,7 @@ class JTC(nn.Module):
         self.jtc_half_size = config.jtc_half_size
         self.jtc_separation = config.jtc_separation
         self.jtc_total_field = config.jtc_total_field
-        self.loss = 0.9660508789898133 # loss as gain
+        self.loss = float(config.loss)
 
     def input_distortion(self, x):
         x = QuantDequant_STE.apply(x, self.config.dac_bits)
@@ -290,6 +358,8 @@ class JTC(nn.Module):
     def output_distortion(self, x):
         x = x * self.loss
         x = self.pd_tia(x)
+        if self.config.adc_scale_input:
+            x = x / x.max()
         x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
 

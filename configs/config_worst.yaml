@@ -1,7 +1,7 @@
-adc_bits: 16
+adc_bits: 6
 adc_scale_input: true
 config_file: template.yaml
-dac_bits: 16
+dac_bits: 4
 driver_distortion_data_path: ./component_data/driver_sim_data.csv
 driver_distortion_polyfit_order: 3
 driver_distortion_strength: 1.0
@@ -18,6 +18,12 @@ output_dir: tempdir
 pd_tia_distortion_data_path: ./component_data/pd_tia_sim_data.csv
 pd_tia_distortion_polyfit_order: 3
 pd_tia_distortion_strength: 1.0
+pd_distortion_data_path: ./component_data/pd_sim_data.csv
+pd_distortion_polyfit_order: null
+pd_distortion_strength: 1.0
+tia_distortion_data_path: ./component_data/tia_sim_data.csv
+tia_distortion_polyfit_order: null
+tia_distortion_strength: 1.0
 num_identical_layers: 1
 num_epochs: 20
 learning_rate: 1e-3
@@ -25,3 +31,4 @@ batch_size: 32
 eval_only: False
 pretrained_weights: ""
 run_pretrain_tests: True
+loss: 0.96

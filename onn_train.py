@@ -52,10 +52,10 @@ def get_data_loaders(
     )
 
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True
+        trainset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True
+        testset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True
     )
     return trainloader, testloader
 
@@ -159,7 +159,9 @@ def evaluate(
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    return 100 * correct / total
+    acc = 100 * correct / total
+    print(f"Accuracy: {acc:.3f}%")
+    return acc
 
 
 def save_checkpoint(

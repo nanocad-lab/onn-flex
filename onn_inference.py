@@ -22,7 +22,7 @@ def run_inference(config: AppConfig, weights_path: str) -> float:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _, testloader = get_data_loaders(config.batch_size)
     model = FFTConvNet(config).to(device)
-    ckpt = torch.load(weights_path, map_location=device)
+    ckpt = torch.load(weights_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
     model.load_state_dict(state_dict)
     acc = evaluate(model, testloader, device)
@@ -33,7 +33,7 @@ def _build_jtc(config: AppConfig) -> JTC:
     driver = Driver(config)
     pd_tia = PD_TIA(config)
     mrm = MRM(config)
-    return JTC(config, driver, mrm, pd_tia)
+    return JTC(config)
 
 
 def compute_snr_enob(
@@ -49,8 +49,8 @@ def compute_snr_enob(
     out_list = []
     ref_list = []
     for _ in range(num_tests):
-        signal = torch.rand(config.jtc_half_size) * 2 - 1
-        kernel = torch.rand(config.jtc_half_size) * 2 - 1
+        signal = torch.rand(1, 1, 1, config.jtc_half_size)
+        kernel = torch.rand(1, config.jtc_half_size)
         out_list.append(jtc(signal, kernel))
         ref_list.append(jtc_ref(signal, kernel))
 
@@ -60,3 +60,48 @@ def compute_snr_enob(
     snr = 10.0 * torch.log10(ref.pow(2).mean() / noise.pow(2).mean())
     enob = (snr - 1.76) / 6.02
     return snr.item(), enob.item()
+
+
+# NEW ------------------------------------------------------------------
+#  SNR helper for the JPS stage
+# ----------------------------------------------------------------------
+
+def compute_snr_jps(
+    config: AppConfig, param: str, num_tests: int = 16, seed: int = 0
+) -> float:
+    """Compute the SNR at the JPS (Fourier plane) for a given distortion parameter.
+
+    The methodology mirrors *compute_snr_enob* but measures the signal after
+    the *post_output_distortion* stage (the JPS) instead of the final inverse
+    propagation.  Only the SNR is returned because ENOB is typically defined
+    for ADC-level metrics and is less meaningful at the optical plane.
+    """
+    torch.manual_seed(seed)
+
+    jtc = _build_jtc(config)
+    ref_cfg = replace(config, **{param: 0.0})
+    jtc_ref = _build_jtc(ref_cfg)
+
+    jps_list = []
+    ref_jps_list = []
+    for _ in range(num_tests):
+        # Random 1-D test vectors (same dimensions used in *compute_snr_enob*)
+        signal = torch.rand(1, config.jtc_half_size)
+        kernel = torch.rand(1, config.jtc_half_size)
+
+        # Build input plane and propagate to JPS for the distorted JTC
+        input_plane = jtc.generate_input_plane(signal, kernel)
+        jft = jtc.post_fft(input_plane)
+        jps_list.append(jtc.post_output_distortion(jft))
+
+        # Same for the reference (ideal) JTC
+        input_plane_ref = jtc_ref.generate_input_plane(signal, kernel)
+        jft_ref = jtc_ref.post_fft(input_plane_ref)
+        ref_jps_list.append(jtc_ref.post_output_distortion(jft_ref))
+
+    jps = torch.stack(jps_list)
+    ref_jps = torch.stack(ref_jps_list)
+
+    noise = jps - ref_jps
+    snr = 10.0 * torch.log10(ref_jps.pow(2).mean() / noise.pow(2).mean())
+    return snr.item()
