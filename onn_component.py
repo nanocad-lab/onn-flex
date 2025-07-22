@@ -9,6 +9,7 @@ from sklearn.metrics import r2_score
 
 # NEW: Helper functions to compute ideal (reference) transfer function coefficients
 
+
 class QuantDequant_STE(torch.autograd.Function):
     # version of the MRR LUT but implemented with straight-thourgh estimator to help training
     @staticmethod
@@ -20,6 +21,7 @@ class QuantDequant_STE(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output, None, None
+
 
 def _compute_linear_coeffs(csv_file: str):
     """Compute coefficients a, b for y = a * x + b using first and last data points."""
