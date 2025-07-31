@@ -50,6 +50,9 @@ class AppConfig:
     mrm_phase_data_path: str = "./data/mrm_phase_data.csv"
     mrm_phase_polyfit_order: int = None
 
+    # LER process variation
+    ler_std_dev: float = 0.0
+
     conv_method: str = "patch"  # "patch" or "dot_product" or "tile"
 
     # ------------------------------------------------------------------

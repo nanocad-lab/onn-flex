@@ -30,9 +30,6 @@ def run_inference(config: AppConfig, weights_path: str) -> float:
 
 
 def _build_jtc(config: AppConfig) -> JTC:
-    driver = Driver(config)
-    pd_tia = PD_TIA(config)
-    mrm = MRM(config)
     return JTC(config)
 
 

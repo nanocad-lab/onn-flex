@@ -6,6 +6,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
+import math
 
 # NEW: Helper functions to compute ideal (reference) transfer function coefficients
 
@@ -101,6 +102,13 @@ def get_ideal_degree(csv_file, max_degree: int = 10):
             last_aic = aic
 
     return "fail"
+
+
+def get_io_ranges(csv_file: str):
+    data = pd.read_csv(csv_file)
+    x = data["input"].values
+    y = data["output"].values
+    return x.min(), x.max(), y.min(), y.max()
 
 
 def get_coeffs(csv_file, degree: int):
@@ -219,9 +227,7 @@ class PD(nn.Module):
         self.register_buffer("coeffs", coeff_tensor)
 
         # Ideal (reference) quadratic coefficients a, b where y = a * x**2 + b
-        ideal_coeffs = _compute_quadratic_coeffs(
-            self.config.pd_distortion_data_path
-        )
+        ideal_coeffs = _compute_quadratic_coeffs(self.config.pd_distortion_data_path)
         self.register_buffer(
             "ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32)
         )
@@ -288,6 +294,17 @@ class MRM(nn.Module):
             self.pwr_degree = get_ideal_degree(self.config.mrm_power_data_path)
         else:
             self.pwr_degree = self.config.mrm_power_polyfit_order
+
+        # Get IO ranges for power
+        # self.pwr_in_min, self.pwr_in_max, self.pwr_out_min, self.pwr_out_max = get_io_ranges(self.config.mrm_power_data_path)
+        self.ph_in_min, self.ph_in_max, self.ph_out_min, self.ph_out_max = (
+            get_io_ranges(self.config.mrm_phase_data_path)
+        )
+        if max(self.ph_out_min, self.ph_out_max) > 2 * np.pi:
+            raise ValueError(
+                "part of the MRM phase output is greater than 2*pi, please check the data to make sure it is in radians"
+            )
+
         pwr_coeffs = get_coeffs(self.config.mrm_power_data_path, self.pwr_degree)
         pwr_coeff_tensor = torch.as_tensor(pwr_coeffs, dtype=torch.float32)
         self.register_buffer("pwr_coeffs", pwr_coeff_tensor)
@@ -336,6 +353,51 @@ class MRM(nn.Module):
         return torch.polar(pwr_y, phase_y)
 
 
+class LER_variation(nn.Module):
+    def __init__(self, config: AppConfig):
+        super().__init__()
+        self.config = config
+        self.dim = self.config.jtc_total_field
+        self.ler_std_dev = self.config.ler_std_dev
+
+    def generate_ler_matrix(self, batch: int, length: int):
+        """
+        Balanced splitter tree (Gaussian i.i.d. ratios) that:
+        • Handles non-powers of two by building to the next power-of-two (m)
+            and center-cropping the m leaves down to n.
+        • Supports an arbitrary batch dimension.
+        • Returns a tensor of shape (batch, n) whose rows sum to n.
+        """
+        m = 1 << (length - 1).bit_length()  # smallest 2^k ≥ n
+        levels = int(math.log2(m))
+
+        powers = m * torch.ones((batch, 1))  # start with 1 W
+
+        for _ in range(levels):
+            k = powers.size(1)
+
+            ratios = torch.normal(0.5, self.ler_std_dev, size=(batch, k)).clamp(0, 1)
+
+            left = ratios * powers
+            right = (1.0 - ratios) * powers
+
+            # Interleave: L1,R1,L2,R2,…  — works for any batch size, including 1
+            new_powers = torch.empty((batch, k * 2))
+            new_powers[:, 0::2] = left
+            new_powers[:, 1::2] = right
+            powers = new_powers  # (batch, 2k)
+
+        # Center-crop from m leaves down to n leaves
+        if length < m:
+            start = (m - length) // 2
+            powers = powers[:, start : start + length]
+
+        return powers
+
+    def forward(self, x):
+        ler_matrix = self.generate_ler_matrix(x.shape[0], x.shape[1])
+        return torch.mul(x, ler_matrix)
+
 class JTC(nn.Module):
     def __init__(self, config: AppConfig):
         super(JTC, self).__init__()
@@ -343,7 +405,7 @@ class JTC(nn.Module):
         self.driver = Driver(config)
         self.mrm = MRM(config)
         self.pd_tia = PD_TIA(config)
-
+        self.ler_variation = LER_variation(config)
         self.jtc_half_size = config.jtc_half_size
         self.jtc_separation = config.jtc_separation
         self.jtc_total_field = config.jtc_total_field
@@ -353,6 +415,8 @@ class JTC(nn.Module):
         x = QuantDequant_STE.apply(x, self.config.dac_bits)
         x = self.driver(x)
         x = self.mrm(x)
+        if self.config.ler_std_dev > 0:
+            x = self.ler_variation(x)
         return x
 
     def output_distortion(self, x):
@@ -422,8 +486,15 @@ class JTC(nn.Module):
 
         same_indices = (
             torch.arange(
-                self.jtc_total_field // 2 + self.jtc_separation + self.jtc_half_size // 2 + 1,
-                self.jtc_total_field // 2 + self.jtc_separation + self.jtc_half_size // 2 + 1 + self.jtc_half_size,
+                self.jtc_total_field // 2
+                + self.jtc_separation
+                + self.jtc_half_size // 2
+                + 1,
+                self.jtc_total_field // 2
+                + self.jtc_separation
+                + self.jtc_half_size // 2
+                + 1
+                + self.jtc_half_size,
                 device=jps.device,
             )
             % self.jtc_total_field

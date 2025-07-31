@@ -24,7 +24,8 @@ pd_distortion_strength: 0.0
 tia_distortion_data_path: ./component_data/tia_sim_data.csv
 tia_distortion_polyfit_order: null
 tia_distortion_strength: 0.0
-num_identical_layers: 1
+ler_std_dev: 0.01
+num_identical_layers: 3
 num_epochs: 20
 learning_rate: 1e-3
 batch_size: 32

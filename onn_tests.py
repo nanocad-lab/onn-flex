@@ -175,7 +175,7 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
 
     # Bottom-right: Final output vs. PyTorch conv reference
     axes[1, 1].plot(out[0, :].detach().cpu().numpy(), label="jtc")
-    axes[1, 1].plot(conv_out.detach().cpu().numpy(), label="torch_conv")
+    axes[1, 1].plot(conv_out[0, :].detach().cpu().numpy(), label="torch_conv")
     axes[1, 1].set_title("Final output comparison")
     axes[1, 1].legend()
 
