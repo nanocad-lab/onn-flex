@@ -25,22 +25,33 @@ class AppConfig:
     # Driver parameters
     driver_distortion_strength: float = 0.0
     driver_distortion_data_path: str = "./data/driver_distortion_data.csv"
-    driver_distortion_polyfit_order: int = 3
+    driver_distortion_polyfit_order: int = None
 
     # PD/TIA parameters
     pd_tia_distortion_strength: float = 0.0
     pd_tia_distortion_data_path: str = "./data/pd_tia_distortion_data.csv"
-    pd_tia_distortion_polyfit_order: int = 3
+    pd_tia_distortion_polyfit_order: int = None
+
+    pd_distortion_data_path: str = "./data/pd_distortion_data.csv"
+    pd_distortion_polyfit_order: int = None
+    pd_distortion_strength: float = 0.0
+
+    tia_distortion_data_path: str = "./data/tia_distortion_data.csv"
+    tia_distortion_polyfit_order: int = None
+    tia_distortion_strength: float = 0.0
 
     # MRM power parameters
     mrm_power_distortion_strength: float = 0.0
     mrm_power_data_path: str = "./data/mrm_power_data.csv"
-    mrm_power_polyfit_order: int = 3
+    mrm_power_polyfit_order: int = None
 
     # MRM phase parameters
     mrm_phase_distortion_strength: float = 0.0
     mrm_phase_data_path: str = "./data/mrm_phase_data.csv"
-    mrm_phase_polyfit_order: int = 3
+    mrm_phase_polyfit_order: int = None
+
+    # LER process variation
+    ler_std_dev: float = 0.0
 
     conv_method: str = "patch"  # "patch" or "dot_product" or "tile"
 
@@ -53,3 +64,5 @@ class AppConfig:
     batch_size: int = 128
     eval_only: bool = False
     pretrained_weights: str = ""
+    run_pretrain_tests: bool = True
+    loss: float = 0.96

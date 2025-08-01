@@ -1,11 +1,12 @@
 import math
 import torch
-import torch.nn as nn
 from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
+from onn_config import AppConfig
+from onn_component import JTC
 
-__all__ = ["PIC", "FTconvlayer"]
+__all__ = ["FTconvlayer"]
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -16,6 +17,7 @@ def _check_8(x: int, name: str):
         raise ValueError(f"{name} length must be 8 for this implementation. Got {x}.")
 
 
+'''
 class PIC(nn.Module):
     """In–memory implementation of the joint transform correlator used in the
     original template. The interface is kept identical so that the training
@@ -93,6 +95,7 @@ class PIC(nn.Module):
             input_full.shape[0], input_full.shape[1], input_full.shape[2], 8
         )
         return output_reshaped
+'''
 
 
 class _ConvNd(Module):
@@ -167,6 +170,7 @@ class FTconvlayer(_ConvNd):
         self,
         in_channels: int,
         out_channels: int,
+        config: AppConfig,
         kernel_size: int = 8,
         batch_size: int = 128,
         stride: int = 1,
@@ -177,8 +181,6 @@ class FTconvlayer(_ConvNd):
         padding_mode: str = "zeros",
         vertical: bool = False,
         hv_concat: bool = False,
-        plane_size: int = 48,
-        sep: int = 8,
     ):
         super().__init__(
             in_channels,
@@ -196,50 +198,52 @@ class FTconvlayer(_ConvNd):
         )
         self.vertical = vertical
         self.hv_concat = hv_concat
-        self.PIC_CONV = PIC(plane_size, sep)
+        self.PIC_CONV = JTC(config)
 
     # ---------------- Internal helpers ------------------
-    def hardware_forward(
-        self, input: torch.Tensor, weight: torch.Tensor
-    ) -> torch.Tensor:
-        return self.PIC_CONV(input, weight)
+    def hardware_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        return self.PIC_CONV(x, weight)
 
-    def conv_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        input_shape = input.shape
-        w = input.shape[2]
-        output = torch.zeros(
-            input_shape[0], self.out_channels, w, w, device=input.device
-        )
-        input = input.permute(0, 3, 1, 2)
-        for c_in in range(input.shape[2]):
-            input_c = input[:, :, c_in : c_in + 1, ...]
+    def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        x_shape = x.shape
+        w = x.shape[2]
+        output = torch.zeros(x_shape[0], self.out_channels, w, w, device=x.device)
+        x = x.permute(0, 3, 1, 2)
+        for c_in in range(x.shape[2]):
+            x_c = x[:, :, c_in : c_in + 1, ...]
             weight_c = weight[c_in, ...]
-            n_patch = int(input.shape[3] / 8)
+            n_patch = int(x.shape[3] / 8)
             c_out_start = (c_in % self.groups) * self.cout_per_cin
             c_out_end = c_out_start + self.cout_per_cin
+
             for i_p in range(n_patch):
-                patch = input_c[..., 8 * i_p : 8 * i_p + 8]
+                patch = x_c[..., 8 * i_p : 8 * i_p + 8]
+                # print(f"x shape: {x.shape}") # B H Cin W
+                # print(f"x_c shape: {x_c.shape}") # B H 1 W
+                # print(f"weight shape: {weight.shape}") # Cin Cout W
+                # print(f"weight_c shape: {weight_c.shape}") # Cout W
+                # print(f"patch shape: {patch.shape}") # B H 1 8
                 system_out = self.hardware_forward(patch, weight_c).permute(0, 2, 3, 1)
                 output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
         return output
 
-    def pseudo_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def pseudo_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         weight_p = weight[..., 0]
         weight_n = weight[..., 1]
-        output_p = self.conv_forward(input, weight_p)
-        output_n = self.conv_forward(input, weight_n)
+        output_p = self.conv_forward(x, weight_p)
+        output_n = self.conv_forward(x, weight_n)
         return output_p - output_n
 
-    def forward(self, input: torch.Tensor):  # type: ignore[override]
+    def forward(self, x: torch.Tensor):  # type: ignore[override]
         if self.hv_concat:
-            conv_h = self.pseudo_forward(input, self.weights)
-            conv_v = self.pseudo_forward(
-                input.permute(0, 1, 3, 2), self.weights
-            ).permute(0, 1, 3, 2)
+            conv_h = self.pseudo_forward(x, self.weights)
+            conv_v = self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
+                0, 1, 3, 2
+            )
             conv_stacked = torch.stack([conv_h, conv_v], dim=2)
             return conv_stacked.view(conv_h.size(0), -1, conv_h.size(2), conv_h.size(3))
         if self.vertical:
-            return self.pseudo_forward(input.permute(0, 1, 3, 2), self.weights).permute(
+            return self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
                 0, 1, 3, 2
             )
-        return self.pseudo_forward(input, self.weights)
+        return self.pseudo_forward(x, self.weights)

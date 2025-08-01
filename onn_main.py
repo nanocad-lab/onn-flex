@@ -165,6 +165,46 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Polynomial fit order for PD/TIA distortion",
     )
 
+    # PD parameters
+    parser.add_argument(
+        "--pd-distortion-strength",
+        type=float,
+        default=yaml_config.pd_distortion_strength,
+        help="PD distortion strength",
+    )
+    parser.add_argument(
+        "--pd-distortion-data-path",
+        type=str,
+        default=yaml_config.pd_distortion_data_path,
+        help="Path to PD distortion data CSV",
+    )
+    parser.add_argument(
+        "--pd-distortion-polyfit-order",
+        type=int,
+        default=yaml_config.pd_distortion_polyfit_order,
+        help="Polynomial fit order for PD distortion",
+    )
+
+    # TIA parameters
+    parser.add_argument(
+        "--tia-distortion-strength",
+        type=float,
+        default=yaml_config.tia_distortion_strength,
+        help="TIA distortion strength",
+    )
+    parser.add_argument(
+        "--tia-distortion-data-path",
+        type=str,
+        default=yaml_config.tia_distortion_data_path,
+        help="Path to TIA distortion data CSV",
+    )
+    parser.add_argument(
+        "--tia-distortion-polyfit-order",
+        type=int,
+        default=yaml_config.tia_distortion_polyfit_order,
+        help="Polynomial fit order for TIA distortion",
+    )
+
     # MRM power parameters
     parser.add_argument(
         "--mrm-power-distortion-strength",
@@ -249,6 +289,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         type=str,
         default=yaml_config.pretrained_weights,
         help="Path to pretrained weights (.pth) for evaluation or resume",
+    )
+    parser.add_argument(
+        "--run-pretrain-tests",
+        dest="run_pretrain_tests",
+        type=bool,
+        default=yaml_config.run_pretrain_tests,
+        help="Run pretrain tests",
     )
 
     args = parser.parse_args()

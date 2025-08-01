@@ -6,6 +6,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
@@ -26,20 +27,20 @@ def get_data_loaders(
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """Create CIFAR-10 train / test dataloaders with the same augmentation
     pipeline used in the original template."""
-    stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    # stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
 
     train_transform = transforms.Compose(
         [
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
             transforms.ToTensor(),
-            transforms.Normalize(*stats, inplace=True),
+            # transforms.Normalize(*stats, inplace=True),
         ]
     )
     test_transform = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(*stats),
+            # transforms.Normalize(*stats),
         ]
     )
 
@@ -51,10 +52,10 @@ def get_data_loaders(
     )
 
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True
+        trainset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True
+        testset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True
     )
     return trainloader, testloader
 
@@ -72,19 +73,25 @@ class FFTConvNet(nn.Module):
 
     def __init__(self, config: AppConfig):
         super().__init__()
-        plane_size = config.jtc_total_field
-        sep = config.jtc_separation
 
         # Stem
         self.conv1 = FTconvlayer(
-            3, 8, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep
+            3,
+            8,
+            config=config,
+            kernel_size=8,
+            hv_concat=True,
         )
         self.bn1 = nn.BatchNorm2d(16)
         self.maxpool1 = nn.MaxPool2d(2)
 
         # Second block (fixed)
         self.conv2 = FTconvlayer(
-            16, 16, kernel_size=8, hv_concat=True, plane_size=plane_size, sep=sep
+            16,
+            16,
+            config=config,
+            kernel_size=8,
+            hv_concat=True,
         )
         self.bn2 = nn.BatchNorm2d(32)
         self.maxpool2 = nn.MaxPool2d(2)
@@ -97,12 +104,10 @@ class FFTConvNet(nn.Module):
                     FTconvlayer(
                         32,
                         16,
+                        config=config,
                         kernel_size=8,
                         hv_concat=True,
-                        plane_size=plane_size,
-                        sep=sep,
                     ),
-                    nn.BatchNorm2d(32),
                     nn.ReLU(inplace=True),
                 )
             )
@@ -119,14 +124,16 @@ class FFTConvNet(nn.Module):
     # pylint: disable=arguments-differ
     def forward(self, x):  # type: ignore[override]
         x = self.conv1(x)
-        x = self.bn1(x)
         x = self.maxpool1(x)
+        x = F.relu(x)
+        x = x / x.max()
 
         x = self.conv2(x)
-        x = self.bn2(x)
         x = self.maxpool2(x)
+        x = F.relu(x)
+        x = x / x.max()
 
-        x = self.blocks(x)
+        # x = self.blocks(x)
         x = self.classifier(x)
         return x
 
@@ -152,7 +159,9 @@ def evaluate(
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    return 100 * correct / total
+    acc = 100 * correct / total
+    print(f"Accuracy: {acc:.3f}%")
+    return acc
 
 
 def save_checkpoint(
@@ -186,7 +195,8 @@ def train_onn_model(config: AppConfig):
     # -------------------------------------------------------------
     #  Pre-training diagnostics (plots & quick sanity checks)
     # -------------------------------------------------------------
-    run_pretrain_tests(config)
+    if config.run_pretrain_tests:
+        run_pretrain_tests(config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

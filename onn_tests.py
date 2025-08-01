@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from onn_config import AppConfig
-from onn_component import get_ideal_degree, get_coeffs, Driver, PD_TIA, MRM, JTC
+from onn_component import get_ideal_degree, get_coeffs, JTC
 
 
 def _plot_fit(
@@ -106,15 +106,12 @@ def _sweep_and_plot(
 def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
     """Run a quick JTC forward pass to ensure outputs are finite and within a sensible range."""
     # Make dummy components (using CSV-driven poly fits)
-    driver = Driver(config)
-    pd_tia = PD_TIA(config)
-    mrm = MRM(config)
-    jtc = JTC(config, driver, mrm, pd_tia)
+    jtc = JTC(config)
 
     # Random batch of signals/kernels in [-1, 1]
     torch.manual_seed(0)
-    signal = torch.rand(8) * 2 - 1
-    kernel = torch.rand(8) * 2 - 1
+    signal = torch.rand(1, 1, 1, config.jtc_half_size)
+    kernel = torch.rand(1, config.jtc_half_size)
     out = jtc(signal, kernel)
 
     if not torch.isfinite(out).all():
@@ -138,42 +135,47 @@ def _plot_array(arr: torch.Tensor, title: str, save_path: str) -> None:
 
 def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     """Plot intermediate JTC stages and compare with PyTorch conv."""
-    driver = Driver(config)
-    pd_tia = PD_TIA(config)
-    mrm = MRM(config)
-    jtc = JTC(config, driver, mrm, pd_tia)
+    jtc = JTC(config)
 
     torch.manual_seed(1)
-    signal = torch.rand(8)
-    kernel = torch.rand(8)
+    signal = torch.rand(1, 1, 1, config.jtc_half_size)
+    kernel = torch.rand(1, config.jtc_half_size)
 
-    input_plane, _, N = jtc.generate_input_plane(signal, kernel)
+    input_plane = jtc.generate_input_plane(signal, kernel)
     jft = jtc.post_fft(input_plane)
     jps = jtc.post_output_distortion(jft)
-    out = jtc.final_output(jps, N)
+    print(f"jps: {jps.shape}")
+    print(f"jps: {jps[0, :]}")
+    out = jtc.inverse_output(jps, config.jtc_half_size)
+    print(f"out: {out.shape}")
+    print(f"out: {out[0, :]}")
 
     # --- Combine stage plots into a single multi-panel PDF ---
     conv_out = torch.nn.functional.conv1d(
-        signal.view(1, 1, -1), kernel.view(1, 1, -1), padding=kernel.shape[0] // 2
-    )[0, 0, : out.shape[0]]
+        signal.view(1, 1, -1), kernel.view(1, 1, -1), padding="same"
+    )[0, :]
+
+    print(f"conv_out: {conv_out.shape}")
+    print(f"conv_out: {conv_out[0, :]}")
+    # input("Press Enter to continue...")
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
 
     # Top-left: Input plane magnitude
-    axes[0, 0].plot(torch.abs(input_plane).detach().cpu().numpy())
+    axes[0, 0].plot(torch.abs(input_plane[0, :]).detach().cpu().numpy())
     axes[0, 0].set_title("Input plane")
 
     # Top-right: After FFT magnitude
-    axes[0, 1].plot(torch.abs(jft).detach().cpu().numpy())
+    axes[0, 1].plot(torch.abs(jft[0, :]).detach().cpu().numpy())
     axes[0, 1].set_title("Post FFT")
 
     # Bottom-left: After output distortion
-    axes[1, 0].plot(jps.detach().cpu().numpy())
+    axes[1, 0].plot(jps[0, :].detach().cpu().numpy())
     axes[1, 0].set_title("Post output distortion")
 
     # Bottom-right: Final output vs. PyTorch conv reference
-    axes[1, 1].plot(out.detach().cpu().numpy(), label="jtc")
-    axes[1, 1].plot(conv_out.detach().cpu().numpy(), label="torch_conv")
+    axes[1, 1].plot(out[0, :].detach().cpu().numpy(), label="jtc")
+    axes[1, 1].plot(conv_out[0, :].detach().cpu().numpy(), label="torch_conv")
     axes[1, 1].set_title("Final output comparison")
     axes[1, 1].legend()
 
@@ -212,6 +214,26 @@ def run_pretrain_tests(config: AppConfig) -> None:
             ref_degree=2,
         )
 
+    # PD
+    if config.pd_distortion_data_path and os.path.exists(
+        config.pd_distortion_data_path
+    ):
+        deg = config.pd_distortion_polyfit_order or get_ideal_degree(
+            config.pd_distortion_data_path
+        )
+        _sweep_and_plot(
+            config.pd_distortion_data_path, deg, config.output_dir, "pd", ref_degree=2
+        )
+
+    # TIA
+    if config.tia_distortion_data_path and os.path.exists(
+        config.tia_distortion_data_path
+    ):
+        deg = config.tia_distortion_polyfit_order or get_ideal_degree(
+            config.tia_distortion_data_path
+        )
+        _sweep_and_plot(config.tia_distortion_data_path, deg, config.output_dir, "tia")
+
     # MRM power
     if config.mrm_power_data_path and os.path.exists(config.mrm_power_data_path):
         deg = config.mrm_power_polyfit_order or get_ideal_degree(
@@ -228,7 +250,12 @@ def run_pretrain_tests(config: AppConfig) -> None:
 
     # Quick JTC sanity check and stage plots
     try:
+        # TODO: Fix stage plots to work with batched JTC
         _stage_plots_jtc(config, config.output_dir)
+    except Exception as e:
+        print(f"[ERROR] JTC stage plots failed: {e}")
+
+    try:
         _range_check_jtc(config, config.output_dir)
     except Exception as e:
         print(f"[ERROR] JTC range check failed: {e}")
