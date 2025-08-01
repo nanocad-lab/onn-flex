@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
 from onn_layers import FTconvlayer
@@ -52,10 +53,12 @@ def get_data_loaders(
     )
 
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True
+        trainset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True,
+        persistent_workers=True, prefetch_factor=2
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True
+        testset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True,
+        persistent_workers=True, prefetch_factor=2
     )
     return trainloader, testloader
 
@@ -133,7 +136,7 @@ class FFTConvNet(nn.Module):
         x = F.relu(x)
         x = x / x.max()
 
-        # x = self.blocks(x)
+        x = self.blocks(x)
         x = self.classifier(x)
         return x
 
@@ -222,6 +225,8 @@ def train_onn_model(config: AppConfig):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
 
     best_acc = 0.0
+    scaler = GradScaler() if device.type == 'cuda' else None
+    
     for epoch in range(config.num_epochs):
         model.train()
         running_loss = 0.0
@@ -232,11 +237,19 @@ def train_onn_model(config: AppConfig):
                 labels.to(device, non_blocking=True),
             )
 
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            with autocast(device_type=device.type, enabled=scaler is not None):
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            else:
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
             running_loss += loss.item()
             pbar.set_postfix({"loss": f"{loss.item():.3f}"})

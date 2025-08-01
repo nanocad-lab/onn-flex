@@ -245,6 +245,14 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Polynomial fit order for MRM phase",
     )
 
+    # Conv method parameters
+    parser.add_argument(
+        "--use-pytorch-conv",
+        action="store_true",
+        default=yaml_config.use_pytorch_conv,
+        help="Use PyTorch conv2d with 'same' padding instead of JTC",
+    )
+
     # ------------------------------------------------------------------
     #  Training / model-related CLI overrides
     # ------------------------------------------------------------------

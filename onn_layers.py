@@ -1,5 +1,6 @@
 import math
 import torch
+import torch.nn.functional as F
 from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
@@ -198,13 +199,37 @@ class FTconvlayer(_ConvNd):
         )
         self.vertical = vertical
         self.hv_concat = hv_concat
+        self.config = config
         self.PIC_CONV = JTC(config)
 
     # ---------------- Internal helpers ------------------
     def hardware_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         return self.PIC_CONV(x, weight)
+    
+    def pytorch_conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """PyTorch conv2d with 'same' padding as alternative to JTC."""
+        # x shape: B H 1 W (batch, height, channels=1, width)  
+        # weight shape: Cout W (output_channels, width)
+        
+        # Reshape weight for conv2d: (out_channels, in_channels, kernel_height, kernel_width)
+        # We use kernel_height=1 since we're doing 1D convolution along width
+        weight_conv = weight.unsqueeze(1).unsqueeze(2)  # Cout W -> Cout 1 1 W
+        
+        # Apply conv2d with 'same' padding
+        # x is B H 1 W, we need to transpose to B 1 H W for conv2d
+        x_conv = x.transpose(1, 2)  # B H 1 W -> B 1 H W
+        
+        # Apply convolution with same padding
+        output = F.conv2d(x_conv, weight_conv, padding='same')  # B Cout H W
+        
+        # Transpose back to match expected output format: B Cout H W -> B H Cout W  
+        output = output.transpose(1, 2)  # B Cout H W -> B H Cout W
+        
+        return output
 
     def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        
+        # Original JTC implementation
         x_shape = x.shape
         w = x.shape[2]
         output = torch.zeros(x_shape[0], self.out_channels, w, w, device=x.device)
@@ -218,12 +243,10 @@ class FTconvlayer(_ConvNd):
 
             for i_p in range(n_patch):
                 patch = x_c[..., 8 * i_p : 8 * i_p + 8]
-                # print(f"x shape: {x.shape}") # B H Cin W
-                # print(f"x_c shape: {x_c.shape}") # B H 1 W
-                # print(f"weight shape: {weight.shape}") # Cin Cout W
-                # print(f"weight_c shape: {weight_c.shape}") # Cout W
-                # print(f"patch shape: {patch.shape}") # B H 1 8
-                system_out = self.hardware_forward(patch, weight_c).permute(0, 2, 3, 1)
+                if self.config.use_pytorch_conv:
+                    system_out = self.pytorch_conv_forward(patch, weight_c).permute(0, 2, 3, 1)
+                else:
+                    system_out = self.hardware_forward(patch, weight_c).permute(0, 2, 3, 1)
                 output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
         return output
 

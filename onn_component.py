@@ -478,7 +478,7 @@ class JTC(nn.Module):
         jps = self.output_distortion(torch.abs(jft))
         return jps
 
-    def inverse_output(self, jps: torch.Tensor, N: int) -> torch.Tensor:
+    def inverse_output(self, jps: torch.Tensor) -> torch.Tensor:
         """Propagate back to the detector plane and crop the result."""
         jps = self.input_distortion(jps)
 
@@ -524,7 +524,7 @@ class JTC(nn.Module):
         # print("jps: ", jps[..., :8])
         # print(f"max: {jps.max()}, min: {jps.min()}")
         # input("Press Enter to continue...")
-        inverse_output = self.inverse_output(jps, self.jtc_half_size)
+        inverse_output = self.inverse_output(jps)
 
         output_reshaped = inverse_output.reshape(
             signal_full.shape[0],

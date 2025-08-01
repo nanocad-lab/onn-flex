@@ -54,6 +54,7 @@ class AppConfig:
     ler_std_dev: float = 0.0
 
     conv_method: str = "patch"  # "patch" or "dot_product" or "tile"
+    use_pytorch_conv: bool = False  # Use PyTorch conv2d with 'same' padding instead of JTC
 
     # ------------------------------------------------------------------
     #  Training / model-related CLI overrides
