@@ -360,7 +360,7 @@ class LER_variation(nn.Module):
         self.dim = self.config.jtc_total_field
         self.ler_std_dev = self.config.ler_std_dev
 
-    def generate_ler_matrix(self, batch: int, length: int):
+    def generate_ler_matrix(self, batch: int, length: int, device=None):
         """
         Balanced splitter tree (Gaussian i.i.d. ratios) that:
         • Handles non-powers of two by building to the next power-of-two (m)
@@ -371,18 +371,20 @@ class LER_variation(nn.Module):
         m = 1 << (length - 1).bit_length()  # smallest 2^k ≥ n
         levels = int(math.log2(m))
 
-        powers = m * torch.ones((batch, 1))  # start with 1 W
+        powers = m * torch.ones((batch, 1), device=device)  # start with 1 W
 
         for _ in range(levels):
             k = powers.size(1)
 
-            ratios = torch.normal(0.5, self.ler_std_dev, size=(batch, k)).clamp(0, 1)
+            ratios = torch.normal(
+                0.5, self.ler_std_dev, size=(batch, k), device=device
+            ).clamp(0, 1)
 
             left = ratios * powers
             right = (1.0 - ratios) * powers
 
             # Interleave: L1,R1,L2,R2,…  — works for any batch size, including 1
-            new_powers = torch.empty((batch, k * 2))
+            new_powers = torch.empty((batch, k * 2), device=device)
             new_powers[:, 0::2] = left
             new_powers[:, 1::2] = right
             powers = new_powers  # (batch, 2k)
@@ -395,7 +397,7 @@ class LER_variation(nn.Module):
         return powers
 
     def forward(self, x):
-        ler_matrix = self.generate_ler_matrix(x.shape[0], x.shape[1])
+        ler_matrix = self.generate_ler_matrix(x.shape[0], x.shape[1], device=x.device)
         return torch.mul(x, ler_matrix)
 
 
