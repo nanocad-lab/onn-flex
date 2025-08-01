@@ -24,7 +24,13 @@ PARAMS = [
 ]
 
 
-def _sweep_param(base_cfg: AppConfig, weights: str, param: str, out_dir: str, strengths: Iterable[int]) -> None:
+def _sweep_param(
+    base_cfg: AppConfig,
+    weights: str,
+    param: str,
+    out_dir: str,
+    strengths: Iterable[int],
+) -> None:
     accs = []
     snrs = []
     enobs = []
@@ -38,7 +44,9 @@ def _sweep_param(base_cfg: AppConfig, weights: str, param: str, out_dir: str, st
         snrs.append(snr)
         enobs.append(enob)
         jps_snrs.append(snr_jps)
-        print(f"{param}={val:.3f} -> acc {acc:.3f}% snr {snr:.2f}dB jps_snr {snr_jps:.2f}dB")
+        print(
+            f"{param}={val:.3f} -> acc {acc:.3f}% snr {snr:.2f}dB jps_snr {snr_jps:.2f}dB"
+        )
 
     results = np.stack([strengths, accs, snrs, enobs, jps_snrs], axis=1)
     np.savetxt(

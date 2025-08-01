@@ -133,7 +133,7 @@ class FFTConvNet(nn.Module):
         x = F.relu(x)
         x = x / x.max()
 
-        #x = self.blocks(x)
+        # x = self.blocks(x)
         x = self.classifier(x)
         return x
 

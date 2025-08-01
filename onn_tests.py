@@ -149,7 +149,7 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     out = jtc.inverse_output(jps, config.jtc_half_size)
     print(f"out: {out.shape}")
     print(f"out: {out[0, :]}")
-    
+
     # --- Combine stage plots into a single multi-panel PDF ---
     conv_out = torch.nn.functional.conv1d(
         signal.view(1, 1, -1), kernel.view(1, 1, -1), padding="same"
@@ -215,14 +215,20 @@ def run_pretrain_tests(config: AppConfig) -> None:
         )
 
     # PD
-    if config.pd_distortion_data_path and os.path.exists(config.pd_distortion_data_path):
+    if config.pd_distortion_data_path and os.path.exists(
+        config.pd_distortion_data_path
+    ):
         deg = config.pd_distortion_polyfit_order or get_ideal_degree(
             config.pd_distortion_data_path
         )
-        _sweep_and_plot(config.pd_distortion_data_path, deg, config.output_dir, "pd", ref_degree=2)
+        _sweep_and_plot(
+            config.pd_distortion_data_path, deg, config.output_dir, "pd", ref_degree=2
+        )
 
     # TIA
-    if config.tia_distortion_data_path and os.path.exists(config.tia_distortion_data_path):
+    if config.tia_distortion_data_path and os.path.exists(
+        config.tia_distortion_data_path
+    ):
         deg = config.tia_distortion_polyfit_order or get_ideal_degree(
             config.tia_distortion_data_path
         )

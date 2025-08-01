@@ -398,6 +398,7 @@ class LER_variation(nn.Module):
         ler_matrix = self.generate_ler_matrix(x.shape[0], x.shape[1])
         return torch.mul(x, ler_matrix)
 
+
 class JTC(nn.Module):
     def __init__(self, config: AppConfig):
         super(JTC, self).__init__()

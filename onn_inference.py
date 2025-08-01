@@ -5,7 +5,7 @@ import torch
 import yaml
 
 from onn_config import AppConfig
-from onn_component import Driver, MRM, PD_TIA, JTC
+from onn_component import JTC
 from onn_train import FFTConvNet, evaluate, get_data_loaders
 
 
@@ -62,6 +62,7 @@ def compute_snr_enob(
 # NEW ------------------------------------------------------------------
 #  SNR helper for the JPS stage
 # ----------------------------------------------------------------------
+
 
 def compute_snr_jps(
     config: AppConfig, param: str, num_tests: int = 16, seed: int = 0
