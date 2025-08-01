@@ -365,7 +365,7 @@ def main() -> None:
         default_strengths = np.arange(0, 1.1, 0.1)
         for param in PARAMS:
             _sweep_param(base_cfg, args.weights, param, args.output_dir, default_strengths)
-
+        _sweep_param(base_cfg, args.weights, "ler_std_dev", args.output_dir, np.arange(0, 0.05, 0.005))
         # 2-D sweep (after 1-D distortion sweeps)
         _sweep_jtc_2d(base_cfg, args.weights, args.output_dir)
 
