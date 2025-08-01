@@ -29,21 +29,20 @@ REF_DIGITAL_ACC = 67.51
 def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
     """Generate plots from previously saved sweep data."""
     data_file = os.path.join(out_dir, f"{param}_results.txt")
-    
+
     if not os.path.exists(data_file):
         print(f"Data file {data_file} not found. Skipping plot generation for {param}.")
         return
-    
+
     # Load previously saved results
     results = np.loadtxt(data_file)
     if results.ndim == 1:
         results = results.reshape(1, -1)  # Handle single row case
-    
+
     strengths = results[:, 0]
     accs = results[:, 1]
     sndrs = results[:, 2]
-    enobs = results[:, 3]
-    
+
     # Handle backward compatibility - old files may not have jps_sndr column
     if results.shape[1] >= 5:
         jps_sndrs = results[:, 4]
@@ -51,14 +50,20 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
         # Use the same SNDR values for both if JPS SNDR is not available
         jps_sndrs = sndrs
         print("Note: Using output SNDR values for JPS SNDR (old format compatibility)")
-    
+
     print(f"Loaded {len(strengths)} data points for {param}")
-    
+
     # Create plot
     fig, ax1 = plt.subplots()
     ax1.plot(strengths, accs, "bo-", label="Accuracy")
     # Add reference digital accuracy line
-    ax1.axhline(y=REF_DIGITAL_ACC, color="k", linestyle="--", alpha=0.7, label=f"Digital Reference ({REF_DIGITAL_ACC:.1f}%)")
+    ax1.axhline(
+        y=REF_DIGITAL_ACC,
+        color="k",
+        linestyle="--",
+        alpha=0.7,
+        label=f"Digital Reference ({REF_DIGITAL_ACC:.1f}%)",
+    )
     ax1.set_xlabel("distortion_strength")
     ax1.set_ylabel("Accuracy (%)", color="b")
     ax1.legend(loc="upper right")
@@ -70,7 +75,7 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, f"{param}_sweep.pdf"))
     plt.close(fig)
-    
+
     print(f"Generated plot: {param}_sweep.pdf")
 
 
@@ -78,22 +83,22 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
     """Generate 2D JTC plots from previously saved sweep data."""
     acc_file = os.path.join(out_dir, "jtc_2d_accuracy.npy")
     sndr_file = os.path.join(out_dir, "jtc_2d_sndr_output.npy")
-    
+
     if not os.path.exists(acc_file) or not os.path.exists(sndr_file):
         print("JTC 2D sweep data files not found. Skipping 2D plot generation.")
         return
-    
+
     # Load previously saved results
     acc_matrix = np.load(acc_file)
     sndr_out_matrix = np.load(sndr_file)
-    
+
     print(f"Loaded JTC 2D sweep data: {acc_matrix.shape}")
-    
+
     # We need to reconstruct the field and sep values based on the data shape
     # This assumes the same ranges as in _sweep_jtc_2d
     sep_values = np.arange(0, acc_matrix.shape[0])
     field_values = np.arange(16, 16 + acc_matrix.shape[1])  # Assuming min_field = 16
-    
+
     # Heat-maps --------------------------------------------------------
     def _plot_heat(data, filename, cbar_label, add_ref_line=False):
         fig, ax = plt.subplots()
@@ -104,27 +109,42 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
         ax.set_yticklabels(sep_values)
         ax.set_xlabel("jtc_total_field")
         ax.set_ylabel("jtc_separation")
-        
+
         fig.colorbar(im, ax=ax, label=cbar_label)
-        
+
         # Add reference line for accuracy plots
         if add_ref_line:
             # Add a contour line at the reference digital accuracy level
-            contour = ax.contour(data, levels=[REF_DIGITAL_ACC], colors='white', linewidths=2, linestyles='--')
-            ax.clabel(contour, inline=True, fontsize=10, fmt='%.1f%%')
+            contour = ax.contour(
+                data,
+                levels=[REF_DIGITAL_ACC],
+                colors="white",
+                linewidths=2,
+                linestyles="--",
+            )
+            ax.clabel(contour, inline=True, fontsize=10, fmt="%.1f%%")
             # Add text annotation for clarity
-            ax.text(0.02, 0.98, f'Digital Reference: {REF_DIGITAL_ACC:.1f}%', 
-                   transform=ax.transAxes, verticalalignment='top', 
-                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
+            ax.text(
+                0.02,
+                0.98,
+                f"Digital Reference: {REF_DIGITAL_ACC:.1f}%",
+                transform=ax.transAxes,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+            )
+
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, filename))
         plt.close(fig)
 
-    _plot_heat(acc_matrix, "jtc_2d_sweep_accuracy.pdf", "Accuracy (%)", add_ref_line=True)
+    _plot_heat(
+        acc_matrix, "jtc_2d_sweep_accuracy.pdf", "Accuracy (%)", add_ref_line=True
+    )
     _plot_heat(sndr_out_matrix, "jtc_2d_sweep_output_sndr.pdf", "SNDR (dB)")
-    
-    print("Generated JTC 2D sweep plots: jtc_2d_sweep_accuracy.pdf, jtc_2d_sweep_output_sndr.pdf")
+
+    print(
+        "Generated JTC 2D sweep plots: jtc_2d_sweep_accuracy.pdf, jtc_2d_sweep_output_sndr.pdf"
+    )
 
 
 def _sweep_param(
@@ -161,7 +181,13 @@ def _sweep_param(
     fig, ax1 = plt.subplots()
     ax1.plot(strengths, accs, "bo-", label="Accuracy")
     # Add reference digital accuracy line
-    ax1.axhline(y=REF_DIGITAL_ACC, color="k", linestyle="--", alpha=0.7, label=f"Digital Reference ({REF_DIGITAL_ACC:.1f}%)")
+    ax1.axhline(
+        y=REF_DIGITAL_ACC,
+        color="k",
+        linestyle="--",
+        alpha=0.7,
+        label=f"Digital Reference ({REF_DIGITAL_ACC:.1f}%)",
+    )
     ax1.set_xlabel("distortion_strength")
     ax1.set_ylabel("Accuracy (%)", color="b")
     ax1.legend(loc="upper right")
@@ -310,62 +336,90 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
         ax.set_yticklabels(sep_values)
         ax.set_xlabel("jtc_total_field")
         ax.set_ylabel("jtc_separation")
-        
+
         fig.colorbar(im, ax=ax, label=cbar_label)
-        
+
         # Add reference line for accuracy plots
         if add_ref_line:
             # Add a contour line at the reference digital accuracy level
-            contour = ax.contour(data, levels=[REF_DIGITAL_ACC], colors='white', linewidths=2, linestyles='--')
-            ax.clabel(contour, inline=True, fontsize=10, fmt='%.1f%%')
+            contour = ax.contour(
+                data,
+                levels=[REF_DIGITAL_ACC],
+                colors="white",
+                linewidths=2,
+                linestyles="--",
+            )
+            ax.clabel(contour, inline=True, fontsize=10, fmt="%.1f%%")
             # Add text annotation for clarity
-            ax.text(0.02, 0.98, f'Digital Reference: {REF_DIGITAL_ACC:.1f}%', 
-                   transform=ax.transAxes, verticalalignment='top', 
-                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
+            ax.text(
+                0.02,
+                0.98,
+                f"Digital Reference: {REF_DIGITAL_ACC:.1f}%",
+                transform=ax.transAxes,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+            )
+
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, filename))
         plt.close(fig)
 
-    _plot_heat(acc_matrix, "jtc_2d_sweep_accuracy.pdf", "Accuracy (%)", add_ref_line=True)
+    _plot_heat(
+        acc_matrix, "jtc_2d_sweep_accuracy.pdf", "Accuracy (%)", add_ref_line=True
+    )
     _plot_heat(sndr_out_matrix, "jtc_2d_sweep_output_sndr.pdf", "SNDR (dB)")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Distortion sweep inference")
     parser.add_argument("--config", help="config yaml (required for new sweeps)")
-    parser.add_argument("--weights", help="trained weights path (required for new sweeps)")
+    parser.add_argument(
+        "--weights", help="trained weights path (required for new sweeps)"
+    )
     parser.add_argument("--output-dir", default="sweep_results")
-    parser.add_argument("--plot-only", action="store_true", 
-                       help="Only generate plots from previously saved data, skip inference")
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Only generate plots from previously saved data, skip inference",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     if args.plot_only:
         # Only generate plots from existing data
         print("Plot-only mode: generating plots from previously saved data...")
-        
+
         # Generate 1D parameter sweep plots
         for param in PARAMS:
             _plot_param_sweep_from_data(param, args.output_dir)
-        
+
         # Generate 2D JTC sweep plots
         _plot_jtc_2d_from_data(args.output_dir)
-        
+
         print("Plot generation completed.")
-        
+
     else:
         # Run full sweep with inference
         if not args.config or not args.weights:
-            parser.error("--config and --weights are required when not using --plot-only")
-        
+            parser.error(
+                "--config and --weights are required when not using --plot-only"
+            )
+
         base_cfg = load_config_from_yaml(args.config)
 
         default_strengths = np.arange(0, 1.1, 0.1)
         for param in PARAMS:
-            _sweep_param(base_cfg, args.weights, param, args.output_dir, default_strengths)
-        _sweep_param(base_cfg, args.weights, "ler_std_dev", args.output_dir, np.arange(0, 0.05, 0.005))
+            _sweep_param(
+                base_cfg, args.weights, param, args.output_dir, default_strengths
+            )
+        _sweep_param(
+            base_cfg,
+            args.weights,
+            "ler_std_dev",
+            args.output_dir,
+            np.arange(0, 0.05, 0.005),
+        )
         # 2-D sweep (after 1-D distortion sweeps)
         _sweep_jtc_2d(base_cfg, args.weights, args.output_dir)
 

@@ -53,12 +53,22 @@ def get_data_loaders(
     )
 
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True,
-        persistent_workers=True, prefetch_factor=2
+        trainset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=16,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True,
-        persistent_workers=True, prefetch_factor=2
+        testset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=16,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
     return trainloader, testloader
 
@@ -225,8 +235,8 @@ def train_onn_model(config: AppConfig):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
 
     best_acc = 0.0
-    scaler = GradScaler() if device.type == 'cuda' else None
-    
+    scaler = GradScaler() if device.type == "cuda" else None
+
     for epoch in range(config.num_epochs):
         model.train()
         running_loss = 0.0

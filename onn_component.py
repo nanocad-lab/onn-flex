@@ -341,7 +341,7 @@ class MRM(nn.Module):
         pwr_ideal_y = self.ideal_pwr_coeffs[0] * x + self.ideal_pwr_coeffs[1]
 
         pwr_y = self.pwr_strength * pwr_poly_y + (1.0 - self.pwr_strength) * pwr_ideal_y
-        
+
         # Apply LER variation to MRM power only
         if self.config.ler_std_dev > 0:
             pwr_y = self.ler_variation(pwr_y)

@@ -32,7 +32,7 @@ python distortion_sweep.py --plot-only --output-dir sweep_results/
 ### Generated Outputs
 - **1D Parameter Sweeps**: Plots showing accuracy and SNDR vs. distortion strength for:
   - Driver distortion
-  - PD-TIA distortion  
+  - PD-TIA distortion
   - MRM power distortion
   - MRM phase distortion
 - **2D JTC Geometry Sweep**: Heatmaps showing accuracy and SNDR vs. JTC separation and total field size
