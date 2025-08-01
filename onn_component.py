@@ -288,6 +288,7 @@ class MRM(nn.Module):
         self.config = config
         self.phase_degree: int = 0
         self.pwr_degree: int = 0
+        self.ler_variation = LER_variation(config)
         if self.config.mrm_power_data_path is None:
             raise ValueError("MRM power data path is not set")
         if self.config.mrm_power_polyfit_order is None:
@@ -340,6 +341,10 @@ class MRM(nn.Module):
         pwr_ideal_y = self.ideal_pwr_coeffs[0] * x + self.ideal_pwr_coeffs[1]
 
         pwr_y = self.pwr_strength * pwr_poly_y + (1.0 - self.pwr_strength) * pwr_ideal_y
+        
+        # Apply LER variation to MRM power only
+        if self.config.ler_std_dev > 0:
+            pwr_y = self.ler_variation(pwr_y)
 
         # Polynomial evaluation for phase
         phase_poly_y = torch.zeros_like(
@@ -408,7 +413,6 @@ class JTC(nn.Module):
         self.driver = Driver(config)
         self.mrm = MRM(config)
         self.pd_tia = PD_TIA(config)
-        self.ler_variation = LER_variation(config)
         self.jtc_half_size = config.jtc_half_size
         self.jtc_separation = config.jtc_separation
         self.jtc_total_field = config.jtc_total_field
@@ -418,8 +422,6 @@ class JTC(nn.Module):
         x = QuantDequant_STE.apply(x, self.config.dac_bits)
         x = self.driver(x)
         x = self.mrm(x)
-        if self.config.ler_std_dev > 0:
-            x = self.ler_variation(x)
         return x
 
     def output_distortion(self, x):
