@@ -30,6 +30,7 @@ PARAMS = [
     "pd_tia_distortion_strength",
     "mrm_power_distortion_strength",
     "mrm_phase_distortion_strength",
+    "ler_std_dev",
 ]
 
 REF_DIGITAL_ACC = 67.51
@@ -79,14 +80,16 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
     else:
         ax1.set_xlabel("Distortion Ratio (α)")
     ax1.set_ylabel("Inference Accuracy (%)", color="b")
-    ax1.legend(loc="upper right")
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
     ax2.plot(strengths, sndrs, "r^-", label="SNDR (pJTC output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
     ax2.set_ylabel("SNDR (dB)", color="r")
-    ax2.legend(loc="lower right")
+    # Combine legends from both axes into a single legend
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(handles1 + handles2, labels1 + labels2, loc="upper right")
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, f"{param}_sweep.pdf"))
     plt.close(fig)
@@ -217,14 +220,16 @@ def _sweep_param(
     else:
         ax1.set_xlabel("Distorted TF Ratio (α)")
     ax1.set_ylabel("Inference Accuracy (%)", color="b")
-    ax1.legend(loc="upper right")
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
     ax2.plot(strengths, sndrs, "r^-", label="SNDR (pJTC output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
     ax2.set_ylabel("SNDR (dB)", color="r")
-    ax2.legend(loc="lower right")
+    # Combine legends from both axes into a single legend
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(handles1 + handles2, labels1 + labels2, loc="upper right")
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, f"{param}_sweep.pdf"))
     plt.close(fig)
@@ -451,13 +456,14 @@ def main() -> None:
             _sweep_param(
                 base_cfg, args.weights, param, args.output_dir, default_strengths
             )
-        _sweep_param(
-            base_cfg,
-            args.weights,
-            "ler_std_dev",
-            args.output_dir,
-            np.arange(0, 0.05, 0.005),
-        )
+            if param == "ler_std_dev":
+                _sweep_param(
+                    base_cfg,
+                    args.weights,
+                    param,
+                    args.output_dir,
+                    np.arange(0, 0.05, 0.005),
+                )
         # 2-D sweep (after 1-D distortion sweeps)
         _sweep_jtc_2d(base_cfg, args.weights, args.output_dir)
 
