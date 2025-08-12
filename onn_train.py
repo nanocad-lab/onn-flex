@@ -208,8 +208,11 @@ def train_onn_model(config: AppConfig):
     # -------------------------------------------------------------
     #  Pre-training diagnostics (plots & quick sanity checks)
     # -------------------------------------------------------------
-    if config.run_pretrain_tests:
+    if config.run_pretrain_tests or config.pretrain_tests_only:
         run_pretrain_tests(config)
+        if config.pretrain_tests_only:
+            print("[INFO] Pretrain tests only requested; exiting without training.")
+            return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -305,6 +305,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.run_pretrain_tests,
         help="Run pretrain tests",
     )
+    parser.add_argument(
+        "--pretrain-tests-only",
+        dest="pretrain_tests_only",
+        action="store_true",
+        default=yaml_config.pretrain_tests_only,
+        help="Run only the pretrain tests/plots and exit",
+    )
 
     args = parser.parse_args()
 

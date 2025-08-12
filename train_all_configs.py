@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
+import argparse
 import yaml
 
 from onn_config import AppConfig
@@ -33,8 +34,8 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 # Explicit list to guarantee execution order.
 CONFIG_FILES: List[str] = [
     "config_ideal.yaml",
-    # "config_pytorch_conv.yaml",
-    # "config_worst.yaml",
+    "config_pytorch_conv.yaml",
+    "config_worst.yaml",
     "config_worst_corr.yaml",
 ]
 
@@ -60,7 +61,17 @@ def _load_app_config(path: Path) -> AppConfig:
 
 
 def main() -> None:
-    """Iterate over the four configs and train a model for each one."""
+    """Iterate over the configs and run training (or pretrain tests only)."""
+
+    parser = argparse.ArgumentParser(
+        description="Train all configured runs or run only pretrain tests"
+    )
+    parser.add_argument(
+        "--pretrain-tests-only",
+        action="store_true",
+        help="Run only the pretrain tests/plots for each config and exit",
+    )
+    args = parser.parse_args()
 
     # Ensure the root output directory exists.
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,8 +98,11 @@ def main() -> None:
         print("=" * 80 + "\n")
 
         # ------------------------------------------------------------------
-        #  Kick off training
+        #  Configure mode and kick off training
         # ------------------------------------------------------------------
+        if args.pretrain_tests_only:
+            cfg.pretrain_tests_only = True
+            cfg.run_pretrain_tests = True
         train_onn_model(cfg)
 
         print("\n" + "-" * 80)

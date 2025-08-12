@@ -119,8 +119,8 @@ def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
 
     # Random batch of signals/kernels in [-1, 1]
     torch.manual_seed(0)
-    signal = torch.rand(1, 1, 1, config.jtc_half_size)
-    kernel = torch.rand(1, config.jtc_half_size)
+    signal = torch.randn(1, 1, 1, config.jtc_half_size)/4
+    kernel = torch.randn(1, config.jtc_half_size)/4
     out = jtc(signal, kernel)
 
     if not torch.isfinite(out).all():
@@ -148,8 +148,8 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     jtc = JTC(config)
 
     torch.manual_seed(1)
-    signal = torch.rand(1, 1, 1, config.jtc_half_size)
-    kernel = torch.rand(1, config.jtc_half_size)
+    signal = torch.randn(1, 1, 1, config.jtc_half_size)/4
+    kernel = torch.randn(1, config.jtc_half_size)/4
 
     input_plane = jtc.generate_input_plane(signal, kernel)
     jft = jtc.post_fft(input_plane)
@@ -203,15 +203,15 @@ def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
 
     Uses `JTC.compute_stage_tensors` to retrieve the following stages (when available):
     input_plane, input_plane_quant, input_plane_driver, input_plane_mrm_phase,
-    input_plane_mrm_pwr, jps_raw, jps_pd_tia, jps_scale, jps_quant, jps_quant4,
+    input_plane_mrm_pwr, jps_raw, jps_pd_tia, jps_scale, jps_quant, jps_quantdac,
     jps_driver, jps_mrm_phase, jps_mrm_pwr, output_raw, output_pd_tia, output_scale,
     output_quant, output_slice.
     """
     jtc = JTC(config)
 
     torch.manual_seed(2)
-    signal = torch.rand(1, config.jtc_half_size)
-    kernel = torch.rand(1, config.jtc_half_size)
+    signal = torch.randn(1, config.jtc_half_size)/4
+    kernel = torch.randn(1, config.jtc_half_size)/4
 
     with torch.no_grad():
         stage_data = jtc.compute_stage_tensors(signal, kernel)

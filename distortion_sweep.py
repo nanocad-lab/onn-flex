@@ -5,7 +5,7 @@ from dataclasses import replace
 import matplotlib.pyplot as plt
 from plot_style import (
     apply_global_plot_style,
-    DEFAULT_AXIS_FONTSIZE,
+    DEFAULT_TICK_LABEL_FONTSIZE,
     DEFAULT_TITLE_FONTSIZE,
     SHOW_TITLES,
 )
@@ -142,7 +142,7 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
                 linestyles="--",
             )
             ax.clabel(
-                contour, inline=True, fontsize=DEFAULT_AXIS_FONTSIZE, fmt="%.1f%%"
+                contour, inline=True, fontsize=DEFAULT_TICK_LABEL_FONTSIZE, fmt="%.1f%%"
             )
             # Add text annotation for clarity
             ax.text(
@@ -383,7 +383,7 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
                 linestyles="--",
             )
             ax.clabel(
-                contour, inline=True, fontsize=DEFAULT_AXIS_FONTSIZE, fmt="%.1f%%"
+                contour, inline=True, fontsize=DEFAULT_TICK_LABEL_FONTSIZE, fmt="%.1f%%"
             )
             # Add text annotation for clarity
             ax.text(

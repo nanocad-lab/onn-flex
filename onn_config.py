@@ -68,4 +68,5 @@ class AppConfig:
     eval_only: bool = False
     pretrained_weights: str = ""
     run_pretrain_tests: bool = True
+    pretrain_tests_only: bool = False
     loss: float = 0.96

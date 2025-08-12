@@ -13,6 +13,11 @@ python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/run
 python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_pytorch/ --use-pytorch-conv --batch-size 128
 ```
 
+## Run only pretrain tests
+```bash
+python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/pretrain_only/ --pretrain-tests-only
+```
+
 # Distortion Sweep Analysis
 
 The distortion sweep script analyzes the impact of various hardware distortions on model performance, generating both accuracy and SNDR (Signal-to-Noise and Distortion Ratio) plots.

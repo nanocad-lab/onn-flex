@@ -431,7 +431,7 @@ class JTC(nn.Module):
             "jps_pd_tia",
             "jps_scale",
             "jps_quant",
-            "jps_quant4",
+            "jps_quantdac",
             "jps_driver",
             "jps_mrm_phase",
             "jps_mrm_pwr",
@@ -638,9 +638,9 @@ class JTC(nn.Module):
         if "jps_quant" in stages:
             results["jps_quant"] = jps_quant[0, :].detach()
         # 4-bit quantization variant
-        jps_quant4 = QuantDequant_STE.apply(jps_scaled, 4)
-        if "jps_quant4" in stages:
-            results["jps_quant4"] = jps_quant4[0, :].detach()
+        jps_quantdac = QuantDequant_STE.apply(jps_scaled, self.config.dac_bits)
+        if "jps_quantdac" in stages:
+            results["jps_quantdac"] = jps_quantdac[0, :].detach()
 
         # Input distortion again before inverse FFT (second pass)
         # DAC quantization
