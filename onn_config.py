@@ -20,35 +20,35 @@ class AppConfig:
     # Quantization parameters
     dac_bits: int = 4
     adc_bits: int = 6
-    adc_scale_input: bool = True
+    scale_output: str = "none"
 
     # Driver parameters
     driver_distortion_strength: float = 0.0
     driver_distortion_data_path: str = "./data/driver_distortion_data.csv"
-    driver_distortion_polyfit_order: int = None
+    driver_distortion_polyfit_order: Optional[int] = None
 
     # PD/TIA parameters
     pd_tia_distortion_strength: float = 0.0
     pd_tia_distortion_data_path: str = "./data/pd_tia_distortion_data.csv"
-    pd_tia_distortion_polyfit_order: int = None
+    pd_tia_distortion_polyfit_order: Optional[int] = None
 
     pd_distortion_data_path: str = "./data/pd_distortion_data.csv"
-    pd_distortion_polyfit_order: int = None
+    pd_distortion_polyfit_order: Optional[int] = None
     pd_distortion_strength: float = 0.0
 
     tia_distortion_data_path: str = "./data/tia_distortion_data.csv"
-    tia_distortion_polyfit_order: int = None
+    tia_distortion_polyfit_order: Optional[int] = None
     tia_distortion_strength: float = 0.0
 
     # MRM power parameters
     mrm_power_distortion_strength: float = 0.0
     mrm_power_data_path: str = "./data/mrm_power_data.csv"
-    mrm_power_polyfit_order: int = None
+    mrm_power_polyfit_order: Optional[int] = None
 
     # MRM phase parameters
     mrm_phase_distortion_strength: float = 0.0
     mrm_phase_data_path: str = "./data/mrm_phase_data.csv"
-    mrm_phase_polyfit_order: int = None
+    mrm_phase_polyfit_order: Optional[int] = None
 
     # LER process variation
     ler_std_dev: float = 0.0

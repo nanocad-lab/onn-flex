@@ -64,7 +64,7 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
 
     # Create plot
     fig, ax1 = plt.subplots()
-    ax1.plot(strengths, accs, "bo-", label="Accuracy")
+    ax1.plot(strengths, accs, "bo-", label="Inference Accuracy")
     # Add reference digital accuracy line
     ax1.axhline(
         y=REF_DIGITAL_ACC,
@@ -73,13 +73,17 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
         alpha=0.7,
         label=f"Digital Reference ({REF_DIGITAL_ACC:.1f}%)",
     )
-    ax1.set_xlabel("distortion_strength")
-    ax1.set_ylabel("Accuracy (%)", color="b")
+    # Set xlabel based on parameter type
+    if param == "ler_std_dev":
+        ax1.set_xlabel("Splitter Ratio Std. Dev.")
+    else:
+        ax1.set_xlabel("Distortion Ratio (α)")
+    ax1.set_ylabel("Inference Accuracy (%)", color="b")
     ax1.legend(loc="upper right")
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
-    ax2.plot(strengths, sndrs, "r^-", label="SNDR (output)")
+    ax2.plot(strengths, sndrs, "r^-", label="SNDR (pJTC output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
     ax2.set_ylabel("SNDR (dB)", color="r")
     ax2.legend(loc="lower right")
@@ -155,7 +159,10 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
         plt.close(fig)
 
     _plot_heat(
-        acc_matrix, "jtc_2d_sweep_accuracy.pdf", "Accuracy (%)", add_ref_line=True
+        acc_matrix,
+        "jtc_2d_sweep_accuracy.pdf",
+        "Inference Accuracy (%)",
+        add_ref_line=True,
     )
     _plot_heat(sndr_out_matrix, "jtc_2d_sweep_output_sndr.pdf", "SNDR (dB)")
 
@@ -188,7 +195,7 @@ def _sweep_param(
             f"{param}={val:.3f} -> acc {acc:.3f}% sndr {sndr:.2f}dB jps_sndr {sndr_jps:.2f}dB"
         )
 
-    results = np.stack([strengths, accs, sndrs, enobs, jps_sndrs], axis=1)
+    results: np.ndarray = np.stack([strengths, accs, sndrs, enobs, jps_sndrs], axis=1)
     np.savetxt(
         os.path.join(out_dir, f"{param}_results.txt"),
         results,
@@ -196,7 +203,7 @@ def _sweep_param(
     )
 
     fig, ax1 = plt.subplots()
-    ax1.plot(strengths, accs, "bo-", label="Accuracy")
+    ax1.plot(strengths, accs, "bo-", label="Inference Accuracy")
     # Add reference digital accuracy line
     ax1.axhline(
         y=REF_DIGITAL_ACC,
@@ -205,13 +212,16 @@ def _sweep_param(
         alpha=0.7,
         label=f"Digital Reference ({REF_DIGITAL_ACC:.1f}%)",
     )
-    ax1.set_xlabel("Distorted TF ratio (α)")
-    ax1.set_ylabel("Accuracy (%)", color="b")
+    if param == "ler_std_dev":
+        ax1.set_xlabel("Splitter Ratio Std. Dev.")
+    else:
+        ax1.set_xlabel("Distorted TF Ratio (α)")
+    ax1.set_ylabel("Inference Accuracy (%)", color="b")
     ax1.legend(loc="upper right")
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
-    ax2.plot(strengths, sndrs, "r^-", label="SNDR (output)")
+    ax2.plot(strengths, sndrs, "r^-", label="SNDR (pJTC output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
     ax2.set_ylabel("SNDR (dB)", color="r")
     ax2.legend(loc="lower right")
@@ -289,7 +299,7 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
     sep_values = np.arange(0, base_cfg.jtc_half_size + 1 + 4)  # 0 … 8 for default cfg
     # Ensure the smallest field is the minimal valid value
     min_field = 2 * base_cfg.jtc_half_size
-    field_values = np.arange(min_field, min_field + 41, 1)  # 16,20,24,28,32
+    field_values = np.arange(min_field, min_field + 41, 4)  # 16,20,24,28,32
 
     acc_matrix = np.full((len(sep_values), len(field_values)), np.nan)
     sndr_out_matrix = np.full_like(acc_matrix, np.nan, dtype=float)
@@ -390,7 +400,10 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
         plt.close(fig)
 
     _plot_heat(
-        acc_matrix, "jtc_2d_sweep_accuracy.pdf", "Accuracy (%)", add_ref_line=True
+        acc_matrix,
+        "jtc_2d_sweep_accuracy.pdf",
+        "Inference Accuracy (%)",
+        add_ref_line=True,
     )
     _plot_heat(sndr_out_matrix, "jtc_2d_sweep_output_sndr.pdf", "SNDR (dB)")
 

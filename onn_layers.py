@@ -5,7 +5,7 @@ from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
 from onn_config import AppConfig
-from onn_component import JTC
+from onn_component import JTC, QuantDequant_STE
 
 __all__ = ["FTconvlayer"]
 
@@ -228,12 +228,16 @@ class FTconvlayer(_ConvNd):
         # Apply convolution with same padding
         output = F.conv2d(x_conv, weight_conv, padding="same")  # B Cout H W
 
-        # Quantize outputs
-        output = QAT_STE.apply(output, self.config.adc_bits + 1)
-
         # Transpose back to match expected output format: B Cout H W -> B H Cout W
         output = output.transpose(1, 2)  # B Cout H W -> B H Cout W
 
+        # Optionally scale before ADC quantization
+        max_val = output.max()
+        if self.config.scale_output == "adc" and max_val.item() > 0:
+            output = output / max_val
+
+        # Apply output ADC quantization
+        output = QuantDequant_STE.apply(output, self.config.adc_bits + 1)
         return output
 
     def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
