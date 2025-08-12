@@ -357,6 +357,8 @@ class MRM(nn.Module):
 
         return torch.polar(pwr_y, phase_y)
 
+    # Note: separate power/phase can be obtained as abs/angle of forward(x)
+
 
 class LER_variation(nn.Module):
     def __init__(self, config: AppConfig):
@@ -418,6 +420,28 @@ class JTC(nn.Module):
         self.jtc_total_field = config.jtc_total_field
         self.loss = float(config.loss)
 
+        # Ordered list of available stage names
+        self.stage_order = [
+            "input_plane",
+            "input_plane_quant",
+            "input_plane_driver",
+            "input_plane_mrm_phase",
+            "input_plane_mrm_pwr",
+            "jps_raw",
+            "jps_pd_tia",
+            "jps_scale",
+            "jps_quant",
+            "jps_quant4",
+            "jps_driver",
+            "jps_mrm_phase",
+            "jps_mrm_pwr",
+            "output_raw",
+            "output_pd_tia",
+            "output_scale",
+            "output_quant",
+            "output_slice",
+        ]
+
     def input_distortion(self, x):
         x = QuantDequant_STE.apply(x, self.config.dac_bits)
         x = self.driver(x)
@@ -426,8 +450,10 @@ class JTC(nn.Module):
 
     def output_distortion(self, x):
         x = x * self.loss
+        if self.config.scale_output == "pd":
+            x = self.scale_to_range(x, 1e-6, 1e-5)
         x = self.pd_tia(x)
-        if self.config.adc_scale_input:
+        if self.config.scale_output == "adc":
             x = x / x.max()
         x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
@@ -506,6 +532,177 @@ class JTC(nn.Module):
         )
         output_slice = output_plane[..., same_indices]
         return output_slice
+
+    def scale_to_range(
+        self, tensor: torch.Tensor, min_val: float = -30, max_val: float = -20
+    ):
+        tensor_min = tensor.min()
+        tensor_max = tensor.max()
+        scaled = (tensor - tensor_min) / (tensor_max - tensor_min)  # Scale to [0,1]
+        return scaled * (max_val - min_val) + min_val  # Scale to [min_val, max_val]
+
+    def compute_stage_tensors(
+        self,
+        signal: torch.Tensor,
+        kernel: torch.Tensor,
+        stages: Tuple[str, ...] | None = None,
+    ) -> dict:
+        """Compute intermediate tensors for the requested pipeline stages.
+
+        Returns a dict of 1D tensors per stage name, suitable for plotting.
+        Complex tensors are converted to magnitudes.
+        """
+        if stages is None:
+            stages = tuple(self.stage_order)
+
+        results: dict[str, torch.Tensor] = {}
+
+        B = signal.shape[0]
+        M = signal.shape[-1]
+        N = kernel.shape[-1]
+        if M > self.jtc_half_size:
+            raise ValueError("Signal length is greater than JTC half size")
+        if N > self.jtc_half_size:
+            raise ValueError("Kernel length is greater than JTC half size")
+        if M + N + self.jtc_separation > self.jtc_total_field:
+            raise ValueError("Not enough JTC field")
+
+        # Indices for placement
+        kernel_start = 0
+        kernel_end = kernel_start + N
+        signal_start = kernel_end + self.jtc_separation
+        signal_end = signal_start + M
+
+        # 1) Quantize (DAC) and place into full input field
+        kernel_quant = QuantDequant_STE.apply(kernel, self.config.dac_bits)
+        signal_quant = QuantDequant_STE.apply(signal, self.config.dac_bits)
+        plane_quant = torch.zeros(
+            B, self.jtc_total_field, dtype=torch.float32, device=signal.device
+        )
+        plane_quant[..., kernel_start:kernel_end] = kernel_quant
+        plane_quant[..., signal_start:signal_end] = signal_quant
+        if "input_plane_quant" in stages:
+            results["input_plane_quant"] = plane_quant[0, :].detach()
+
+        # 2) Driver on the full field
+        plane_driver = self.driver(plane_quant)
+        if "input_plane_driver" in stages:
+            results["input_plane_driver"] = plane_driver[0, :].detach()
+
+        # 3) MRM on the full, driver-processed field
+        plane_mrm = self.mrm(plane_driver)
+        # Store overall input plane magnitude
+        if "input_plane" in stages:
+            results["input_plane"] = torch.abs(plane_mrm)[0, :].detach()
+        # Store separate power and phase components (real-valued)
+        if "input_plane_mrm_pwr" in stages:
+            results["input_plane_mrm_pwr"] = torch.abs(plane_mrm)[0, :].detach()
+        if "input_plane_mrm_phase" in stages:
+            results["input_plane_mrm_phase"] = torch.angle(plane_mrm)[0, :].detach()
+
+        B = signal.shape[0]
+        M = signal.shape[-1]
+        N = kernel.shape[-1]
+        kernel_start = 0
+        kernel_end = kernel_start + N
+        signal_start = kernel_end + self.jtc_separation
+        signal_end = signal_start + M
+        # For propagation, reuse the complex input plane computed above
+        input_plane_full = plane_mrm
+
+        # Fourier plane
+        jft = self.post_fft(input_plane_full)
+        if "jps_raw" in stages:
+            results["jps_raw"] = torch.abs(jft)[0, :].detach()
+
+        # Output distortion (first pass)
+        # Apply loss then PD/TIA
+        jps_base = torch.abs(jft) * self.loss
+
+        if self.config.scale_output == "pd":
+            jps_base = self.scale_to_range(jps_base, 1e-6, 1e-5)
+
+        jps_pd_tia = self.pd_tia(jps_base)
+        if "jps_pd_tia" in stages:
+            results["jps_pd_tia"] = jps_pd_tia[0, :].detach()
+
+        # Scale (ADC pre-scale)
+        if self.config.scale_output == "adc":
+            jps_scaled = jps_pd_tia / jps_pd_tia.max()
+        else:
+            jps_scaled = jps_pd_tia
+        if "jps_scale" in stages:
+            results["jps_scale"] = jps_scaled[0, :].detach()
+        # Quantize (ADC bits)
+        jps_quant = QuantDequant_STE.apply(jps_scaled, self.config.adc_bits)
+        if "jps_quant" in stages:
+            results["jps_quant"] = jps_quant[0, :].detach()
+        # 4-bit quantization variant
+        jps_quant4 = QuantDequant_STE.apply(jps_scaled, 4)
+        if "jps_quant4" in stages:
+            results["jps_quant4"] = jps_quant4[0, :].detach()
+
+        # Input distortion again before inverse FFT (second pass)
+        # DAC quantization
+        jps_dac = QuantDequant_STE.apply(jps_quant, self.config.dac_bits)
+        jps_driver = self.driver(jps_dac)
+        if "jps_driver" in stages:
+            results["jps_driver"] = jps_driver[0, :].detach()
+        jps_complex = self.mrm(jps_driver)
+        jps_pwr = torch.abs(jps_complex)
+        jps_phase = torch.angle(jps_complex)
+        if "jps_mrm_pwr" in stages:
+            results["jps_mrm_pwr"] = jps_pwr[0, :].detach()
+        if "jps_mrm_phase" in stages:
+            results["jps_mrm_phase"] = jps_phase[0, :].detach()
+        # jps_complex already includes both components
+
+        # Back to detector plane
+        output_plane = torch.fft.fft(jps_complex)
+        output_plane = torch.fft.fftshift(output_plane)
+        output_raw = torch.abs(output_plane) * self.loss
+        if "output_raw" in stages:
+            results["output_raw"] = output_raw[0, :].detach()
+
+        if self.config.scale_output == "pd":
+            output_raw = self.scale_to_range(output_raw, 1e-6, 1e-5)
+
+        out_pd_tia = self.pd_tia(output_raw)
+        if "output_pd_tia" in stages:
+            results["output_pd_tia"] = out_pd_tia[0, :].detach()
+
+        if self.config.scale_output == "adc":
+            out_scaled = out_pd_tia / out_pd_tia.max()
+        else:
+            out_scaled = out_pd_tia
+
+        if "output_scale" in stages:
+            results["output_scale"] = out_scaled[0, :].detach()
+
+        out_quant = QuantDequant_STE.apply(out_scaled, self.config.adc_bits)
+        if "output_quant" in stages:
+            results["output_quant"] = out_quant[0, :].detach()
+
+        same_indices = (
+            torch.arange(
+                self.jtc_total_field // 2
+                + self.jtc_separation
+                + self.jtc_half_size // 2
+                + 1,
+                self.jtc_total_field // 2
+                + self.jtc_separation
+                + self.jtc_half_size // 2
+                + 1
+                + self.jtc_half_size,
+                device=jps_complex.device,
+            )
+            % self.jtc_total_field
+        )
+        output_slice = out_quant[..., same_indices]
+        if "output_slice" in stages:
+            results["output_slice"] = output_slice[0, :].detach()
+
+        return results
 
     def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         # signal B H 1 W

@@ -3,6 +3,12 @@ import os
 from dataclasses import replace
 
 import matplotlib.pyplot as plt
+from plot_style import (
+    apply_global_plot_style,
+    DEFAULT_AXIS_FONTSIZE,
+    DEFAULT_TITLE_FONTSIZE,
+    SHOW_TITLES,
+)
 import numpy as np
 import torch
 from onn_inference import _build_jtc
@@ -15,6 +21,9 @@ from onn_inference import (
     load_config_from_yaml,
     run_inference,
 )
+
+# Apply shared Matplotlib style (labels/ticks/titles)
+apply_global_plot_style()
 
 PARAMS = [
     "driver_distortion_strength",
@@ -67,6 +76,8 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
     ax1.set_xlabel("distortion_strength")
     ax1.set_ylabel("Accuracy (%)", color="b")
     ax1.legend(loc="upper right")
+    if SHOW_TITLES:
+        ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
     ax2.plot(strengths, sndrs, "r^-", label="SNDR (output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
@@ -111,6 +122,10 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
         ax.set_ylabel("jtc_separation")
 
         fig.colorbar(im, ax=ax, label=cbar_label)
+        if SHOW_TITLES:
+            ax.set_title(
+                f"JTC 2D Sweep - {cbar_label}", fontsize=DEFAULT_TITLE_FONTSIZE
+            )
 
         # Add reference line for accuracy plots
         if add_ref_line:
@@ -122,7 +137,9 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
                 linewidths=2,
                 linestyles="--",
             )
-            ax.clabel(contour, inline=True, fontsize=10, fmt="%.1f%%")
+            ax.clabel(
+                contour, inline=True, fontsize=DEFAULT_AXIS_FONTSIZE, fmt="%.1f%%"
+            )
             # Add text annotation for clarity
             ax.text(
                 0.02,
@@ -188,9 +205,11 @@ def _sweep_param(
         alpha=0.7,
         label=f"Digital Reference ({REF_DIGITAL_ACC:.1f}%)",
     )
-    ax1.set_xlabel("distortion_strength")
+    ax1.set_xlabel("Distorted TF ratio (α)")
     ax1.set_ylabel("Accuracy (%)", color="b")
     ax1.legend(loc="upper right")
+    if SHOW_TITLES:
+        ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
     ax2.plot(strengths, sndrs, "r^-", label="SNDR (output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
@@ -338,6 +357,10 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
         ax.set_ylabel("jtc_separation")
 
         fig.colorbar(im, ax=ax, label=cbar_label)
+        if SHOW_TITLES:
+            ax.set_title(
+                f"JTC 2D Sweep - {cbar_label}", fontsize=DEFAULT_TITLE_FONTSIZE
+            )
 
         # Add reference line for accuracy plots
         if add_ref_line:
@@ -349,7 +372,9 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
                 linewidths=2,
                 linestyles="--",
             )
-            ax.clabel(contour, inline=True, fontsize=10, fmt="%.1f%%")
+            ax.clabel(
+                contour, inline=True, fontsize=DEFAULT_AXIS_FONTSIZE, fmt="%.1f%%"
+            )
             # Add text annotation for clarity
             ax.text(
                 0.02,

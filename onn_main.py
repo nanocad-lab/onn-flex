@@ -119,10 +119,10 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="ADC bits for quantization",
     )
     parser.add_argument(
-        "--adc-scale-input",
-        type=bool,
-        default=yaml_config.adc_scale_input,
-        help="Whether to scale ADC input",
+        "--scale-output",
+        type=str,
+        default=yaml_config.scale_output,
+        help="Where to scale output ['none', 'pd', 'adc']",
     )
 
     # Driver parameters

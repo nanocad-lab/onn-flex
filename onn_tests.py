@@ -5,10 +5,18 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from plot_style import (
+    apply_global_plot_style,
+    DEFAULT_TITLE_FONTSIZE,
+    SHOW_TITLES,
+)
 import torch
 
 from onn_config import AppConfig
 from onn_component import get_ideal_degree, get_coeffs, JTC
+
+# Apply shared Matplotlib style (labels/ticks/titles)
+apply_global_plot_style()
 
 
 def _plot_fit(
@@ -49,7 +57,8 @@ def _plot_fit(
     )
     plt.xlabel("Input")
     plt.ylabel("Output")
-    plt.title(title)
+    if SHOW_TITLES:
+        plt.title(title, fontsize=DEFAULT_TITLE_FONTSIZE)
     plt.legend()
     plt.tight_layout()
     plt.savefig(save_path)
@@ -127,7 +136,8 @@ def _plot_array(arr: torch.Tensor, title: str, save_path: str) -> None:
     plt.figure(figsize=(6, 4))
     arr_np = arr.detach().cpu().numpy()
     plt.plot(arr_np)
-    plt.title(title)
+    if SHOW_TITLES:
+        plt.title(title, fontsize=DEFAULT_TITLE_FONTSIZE)
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
@@ -146,7 +156,7 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     jps = jtc.post_output_distortion(jft)
     print(f"jps: {jps.shape}")
     print(f"jps: {jps[0, :]}")
-    out = jtc.inverse_output(jps, config.jtc_half_size)
+    out = jtc.inverse_output(jps)
     print(f"out: {out.shape}")
     print(f"out: {out[0, :]}")
 
@@ -163,25 +173,86 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
 
     # Top-left: Input plane magnitude
     axes[0, 0].plot(torch.abs(input_plane[0, :]).detach().cpu().numpy())
-    axes[0, 0].set_title("Input plane")
+    if SHOW_TITLES:
+        axes[0, 0].set_title("Input plane", fontsize=DEFAULT_TITLE_FONTSIZE)
 
     # Top-right: After FFT magnitude
     axes[0, 1].plot(torch.abs(jft[0, :]).detach().cpu().numpy())
-    axes[0, 1].set_title("Post FFT")
+    if SHOW_TITLES:
+        axes[0, 1].set_title("Post FFT", fontsize=DEFAULT_TITLE_FONTSIZE)
 
     # Bottom-left: After output distortion
     axes[1, 0].plot(jps[0, :].detach().cpu().numpy())
-    axes[1, 0].set_title("Post output distortion")
+    if SHOW_TITLES:
+        axes[1, 0].set_title("Post output distortion", fontsize=DEFAULT_TITLE_FONTSIZE)
 
     # Bottom-right: Final output vs. PyTorch conv reference
     axes[1, 1].plot(out[0, :].detach().cpu().numpy(), label="jtc")
     axes[1, 1].plot(conv_out[0, :].detach().cpu().numpy(), label="torch_conv")
-    axes[1, 1].set_title("Final output comparison")
+    if SHOW_TITLES:
+        axes[1, 1].set_title("Final output comparison", fontsize=DEFAULT_TITLE_FONTSIZE)
     axes[1, 1].legend()
 
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "stage_plots.pdf"))
     plt.close(fig)
+
+
+def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
+    """Compute and plot detailed JTC pipeline stages into a single multi-panel PDF.
+
+    Uses `JTC.compute_stage_tensors` to retrieve the following stages (when available):
+    input_plane, input_plane_quant, input_plane_driver, input_plane_mrm_phase,
+    input_plane_mrm_pwr, jps_raw, jps_pd_tia, jps_scale, jps_quant, jps_quant4,
+    jps_driver, jps_mrm_phase, jps_mrm_pwr, output_raw, output_pd_tia, output_scale,
+    output_quant, output_slice.
+    """
+    jtc = JTC(config)
+
+    torch.manual_seed(2)
+    signal = torch.rand(1, config.jtc_half_size)
+    kernel = torch.rand(1, config.jtc_half_size)
+
+    with torch.no_grad():
+        stage_data = jtc.compute_stage_tensors(signal, kernel)
+
+    ordered_names = [
+        name
+        for name in getattr(jtc, "stage_order", list(stage_data.keys()))
+        if name in stage_data
+    ]
+    num_stages = len(ordered_names)
+    if num_stages == 0:
+        print("[WARNING] No stages produced for detailed plot.")
+        return
+
+    cols = 3
+    rows = (num_stages + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols + 2, 2.5 * rows))
+    if rows == 1 and cols == 1:
+        axes = [[axes]]
+    elif rows == 1:
+        axes = [axes]
+
+    for idx, name in enumerate(ordered_names):
+        r = idx // cols
+        c = idx % cols
+        arr = stage_data[name].detach().cpu().numpy()
+        axes[r][c].plot(arr)
+        if SHOW_TITLES:
+            axes[r][c].set_title(name, fontsize=DEFAULT_TITLE_FONTSIZE)
+
+    # Hide any unused subplots
+    for k in range(num_stages, rows * cols):
+        r = k // cols
+        c = k % cols
+        axes[r][c].axis("off")
+
+    fig.tight_layout()
+    out_path = os.path.join(output_dir, "stage_plots_detailed.pdf")
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"[TEST] Saved detailed stage plot {out_path}")
 
 
 def run_pretrain_tests(config: AppConfig) -> None:
@@ -259,3 +330,9 @@ def run_pretrain_tests(config: AppConfig) -> None:
         _range_check_jtc(config, config.output_dir)
     except Exception as e:
         print(f"[ERROR] JTC range check failed: {e}")
+
+    # Detailed stage plots (non-fatal)
+    try:
+        _stage_plots_detailed(config, config.output_dir)
+    except Exception as e:
+        print(f"[ERROR] Detailed JTC stage plots failed: {e}")

@@ -221,8 +221,15 @@ class FTconvlayer(_ConvNd):
         # x is B H 1 W, we need to transpose to B 1 H W for conv2d
         x_conv = x.transpose(1, 2)  # B H 1 W -> B 1 H W
 
+        # Quantize inputs (extra bit for sign)
+        x_conv = QAT_STE.apply(x_conv, self.config.dac_bits)
+        weight_conv = QAT_STE.apply(weight_conv, self.config.dac_bits + 1)
+
         # Apply convolution with same padding
         output = F.conv2d(x_conv, weight_conv, padding="same")  # B Cout H W
+
+        # Quantize outputs
+        output = QAT_STE.apply(output, self.config.adc_bits + 1)
 
         # Transpose back to match expected output format: B Cout H W -> B H Cout W
         output = output.transpose(1, 2)  # B Cout H W -> B H Cout W
@@ -275,3 +282,22 @@ class FTconvlayer(_ConvNd):
                 0, 1, 3, 2
             )
         return self.pseudo_forward(x, self.weights)
+
+
+class QAT_STE(torch.autograd.Function):
+    # Quantization and dequantization with straight-thourgh estimator to help training
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, bits: int) -> torch.Tensor:
+        levels = 2**bits
+
+        # normalize to 0-1
+        input_norm = (input - input.min()) / (input.max() - input.min())
+        # quantize
+        quantized = torch.round(input_norm * (levels - 1)) / (levels - 1)
+        # return to original range
+        quantized = quantized * (input.max() - input.min()) + input.min()
+        return quantized
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
