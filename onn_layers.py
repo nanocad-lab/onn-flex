@@ -203,9 +203,13 @@ class FTconvlayer(_ConvNd):
         self.config = config
         self.PIC_CONV = JTC(config)
         # Persist only the quantizer name (avoid lambdas for pickle safety)
-        self.quantizer_name = getattr(self.config, "quantizer", "ste_clipped") or "ste_clipped"
+        self.quantizer_name = (
+            getattr(self.config, "quantizer", "ste_clipped") or "ste_clipped"
+        )
 
-    def _apply_quantizer(self, tensor: torch.Tensor, bits: int, domain: str) -> torch.Tensor:
+    def _apply_quantizer(
+        self, tensor: torch.Tensor, bits: int, domain: str
+    ) -> torch.Tensor:
         """Apply configured quantizer by name for the given domain.
         domain in {activation, weight, output, fourier} controls signedness.
         """
@@ -249,8 +253,12 @@ class FTconvlayer(_ConvNd):
 
         # Quantize inputs (extra bit for sign)
         if self.config.dac_bits is not None:
-            x_conv = self._apply_quantizer(x_conv, self.config.dac_bits, domain="activation")
-            weight_conv = self._apply_quantizer(weight_conv, self.config.dac_bits, domain="weight")
+            x_conv = self._apply_quantizer(
+                x_conv, self.config.dac_bits, domain="activation"
+            )
+            weight_conv = self._apply_quantizer(
+                weight_conv, self.config.dac_bits, domain="weight"
+            )
 
         # Apply convolution with same padding
         output = F.conv2d(x_conv, weight_conv, padding="same")  # B Cout H W
@@ -265,10 +273,14 @@ class FTconvlayer(_ConvNd):
 
         # Apply output ADC quantization
         if self.config.adc_bits is not None:
-            output = self._apply_quantizer(output, self.config.adc_bits, domain="output")
+            output = self._apply_quantizer(
+                output, self.config.adc_bits, domain="output"
+            )
         return output
 
-    def fourier_conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def fourier_conv_forward(
+        self, x: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
         """Software JTC-style correlation via FFT with optional JPS quantization.
 
         Implements the provided block using plane_size=config.jtc_total_field and
@@ -284,7 +296,9 @@ class FTconvlayer(_ConvNd):
 
         batch_size, height, in_ch, width = x.shape
         if in_ch != 1:
-            raise ValueError("fourier_conv_forward expects in_ch == 1 for local patch conv")
+            raise ValueError(
+                "fourier_conv_forward expects in_ch == 1 for local patch conv"
+            )
         if width != self.kernel_size:
             raise ValueError("Patch width must equal kernel_size for fourier path")
 
@@ -292,11 +306,15 @@ class FTconvlayer(_ConvNd):
 
         if self.config.dac_bits is not None:
             x = self._apply_quantizer(x, self.config.dac_bits, domain="activation")
-            weight = self._apply_quantizer(weight, self.config.dac_bits, domain="weight")
+            weight = self._apply_quantizer(
+                weight, self.config.dac_bits, domain="weight"
+            )
 
         # Repeat to pair each signal with each kernel (per-output channel)
         input_full = x.repeat(1, 1, cout, 1)  # B H Cout W
-        weight_full = weight.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)  # B H Cout W
+        weight_full = (
+            weight.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
+        )  # B H Cout W
 
         # Save shapes
         B = input_full.shape[0]
@@ -305,9 +323,13 @@ class FTconvlayer(_ConvNd):
         M = input_full.shape[-1]
         N = weight_full.shape[-1]
         if M != 8 or N != 8:
-            raise ValueError(f"Input signal and kernel last dimension must be 8. Got {M} and {N}.")
+            raise ValueError(
+                f"Input signal and kernel last dimension must be 8. Got {M} and {N}."
+            )
         if input_full.shape[:-1] != weight_full.shape[:-1]:
-            raise ValueError("Input signal and kernel_weights must have matching batch dimensions.")
+            raise ValueError(
+                "Input signal and kernel_weights must have matching batch dimensions."
+            )
 
         # Flatten for batch JTC processing: [B*H*C, 8]
         batch_size_for_jtc = B * H * C
@@ -345,7 +367,9 @@ class FTconvlayer(_ConvNd):
 
         # Quantize at JPS if enabled (Fourier-plane quantization point)
         if self.config.fourier_plane_bits is not None:
-            jps_batch = self._apply_quantizer(jps_batch.real, self.config.fourier_plane_bits, domain="fourier")
+            jps_batch = self._apply_quantizer(
+                jps_batch.real, self.config.fourier_plane_bits, domain="fourier"
+            )
 
         # Back to output plane and take magnitude
         output_plane_fft = torch.fft.fft(jps_batch, dim=-1)
@@ -370,7 +394,7 @@ class FTconvlayer(_ConvNd):
         max_val = out.max()
         if self.config.scale_output == "adc" and max_val.item() > 0:
             out = out / max_val
-        
+
         if self.config.adc_bits is not None:
             out = self._apply_quantizer(out, self.config.adc_bits, domain="output")
         return out
@@ -414,7 +438,7 @@ class FTconvlayer(_ConvNd):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         if self.hv_concat:
-            conv_h = self.pseudo_forward(x, self.weights)
+            con`v_h = self.pseudo_forward(x, self.weights)
             conv_v = self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
                 0, 1, 3, 2
             )
@@ -426,28 +450,31 @@ class FTconvlayer(_ConvNd):
             )
         return self.pseudo_forward(x, self.weights)
 
+
 def _uniform_quantize(x, bits: int, s: float = 1.0, signed: bool = False):
     """
     Forward: clip to [0,s] if unsigned else [-s,s], then uniform quantize.
     Returns (q, lo, hi, delta)
     """
-    L = 2 ** bits
+    L = 2**bits
     if signed:
         lo, hi = -s, s
         delta = (hi - lo) / (L - 1)  # = 2*s/(L-1)
         xq = torch.clamp(x, lo, hi)
-        q  = torch.round((xq - lo) / delta) * delta + lo
+        q = torch.round((xq - lo) / delta) * delta + lo
     else:
         lo, hi = 0.0, s
         delta = (hi - lo) / (L - 1)  # = s/(L-1)
         xq = torch.clamp(x, lo, hi)
-        q  = torch.round((xq - lo) / delta) * delta + lo
+        q = torch.round((xq - lo) / delta) * delta + lo
     return q, lo, hi, delta
 
 
 class QAT_IOS(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False) -> torch.Tensor:
+    def forward(
+        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False
+    ) -> torch.Tensor:
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed)
         ctx.save_for_backward(x)
         ctx.lo, ctx.hi = lo, hi
@@ -458,14 +485,17 @@ class QAT_IOS(torch.autograd.Function):
         (x,) = ctx.saved_tensors
         lo, hi = ctx.lo, ctx.hi
         inside = (x >= lo) & (x <= hi)
-        pull_left  = (x >  hi) & (g < 0)   # decreasing x moves it inward
-        pull_right = (x <  lo) & (g > 0)   # increasing x moves it inward
+        pull_left = (x > hi) & (g < 0)  # decreasing x moves it inward
+        pull_right = (x < lo) & (g > 0)  # increasing x moves it inward
         mask = (inside | pull_left | pull_right).to(g.dtype)
         return g * mask, None, None, None
 
+
 class QAT_MAD(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = True) -> torch.Tensor:
+    def forward(
+        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = True
+    ) -> torch.Tensor:
         # MAD is intended for symmetric (signed) weight quantization.
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed=True if signed else False)
         ctx.save_for_backward(x)
@@ -486,18 +516,21 @@ class QAT_MAD(torch.autograd.Function):
             w = inside.to(g.dtype) + outside * scale.to(g.dtype)
         else:
             # unsigned MAD (right-clipping emphasis): 1 for x<=s, s/x for x>s, 0 for x<0
-            right = (x > hi)
-            left  = (x < lo)
-            center = (~right & ~left)
+            right = x > hi
+            left = x < lo
+            center = ~right & ~left
             w = torch.zeros_like(g, dtype=g.dtype)
             w = torch.where(center, torch.ones_like(w), w)
             w = torch.where(right, (s / (x + 1e-12)).clamp_max(1.0).to(g.dtype), w)
             # left region stays 0 (acts like PWL on the left)
         return g * w, None, None, None
 
+
 class QAT_MPH(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, is_weight: bool = True) -> torch.Tensor:
+    def forward(
+        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, is_weight: bool = True
+    ) -> torch.Tensor:
         signed = bool(is_weight)  # weights → symmetric; activations → unsigned
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed)
         ctx.save_for_backward(x)
@@ -521,9 +554,12 @@ class QAT_MPH(torch.autograd.Function):
             w = ((x >= lo) & (x <= hi)).to(g.dtype)
         return g * w, None, None, None
 
+
 class QAT_PWL(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False) -> torch.Tensor:
+    def forward(
+        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False
+    ) -> torch.Tensor:
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed)
         ctx.save_for_backward(x)
         ctx.lo, ctx.hi = lo, hi
@@ -535,6 +571,7 @@ class QAT_PWL(torch.autograd.Function):
         lo, hi = ctx.lo, ctx.hi
         mask = ((x >= lo) & (x <= hi)).to(g.dtype)
         return g * mask, None, None, None
+
 
 class QAT_STE_maxscale(torch.autograd.Function):
     # Quantization and dequantization with straight-thourgh estimator to help training
@@ -556,15 +593,23 @@ class QAT_STE_maxscale(torch.autograd.Function):
         # Return gradients for (input, bits)
         return grad_output, None
 
+
 class QAT_STE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input: torch.Tensor, bits: int, s: float = 1.0, ) -> torch.Tensor:
+    def forward(
+        ctx,
+        input: torch.Tensor,
+        bits: int,
+        s: float = 1.0,
+    ) -> torch.Tensor:
         # save original input to know who was saturated
         ctx.save_for_backward(input)
         ctx.bits = bits  # not used in backward, but harmless to keep
-        levels = 2 ** bits
+        levels = 2**bits
         return torch.round(torch.clamp(input, 0.0, s) * (levels - 1)) / (levels - 1)
 
     @staticmethod
-    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None, None]:
+    def backward(
+        ctx: Any, grad_output: torch.Tensor
+    ) -> Tuple[torch.Tensor, None, None]:
         return grad_output, None, None

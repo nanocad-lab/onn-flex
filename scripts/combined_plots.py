@@ -29,7 +29,9 @@ from scripts.distortion_sweep import REF_DIGITAL_ACC, ACC_YLIM, SNDR_YLIM
 apply_global_plot_style()
 
 
-def _load_sweep_results(sweep_dir: str, param: str) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+def _load_sweep_results(
+    sweep_dir: str, param: str
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """Load a parameter sweep results file saved by distortion_sweep.
 
     Returns tuple: (strengths, accs, sndrs, jps_sndrs)
@@ -67,10 +69,19 @@ def _plot_sweep_on_axes(
     ms = 3 if compact else 5
     lw = 1.0 if compact else 1.5
     label_fs = 9 if compact else DEFAULT_AXIS_LABEL_FONTSIZE
-    acc_line = ax1.plot(strengths, accs, "bo-", label="Inference Accuracy", markersize=ms, linewidth=lw)[0]
+    acc_line = ax1.plot(
+        strengths, accs, "bo-", label="Inference Accuracy", markersize=ms, linewidth=lw
+    )[0]
     # Reference digital accuracy (from distortion_sweep)
     ref_acc = REF_DIGITAL_ACC
-    ref_line = ax1.axhline(y=ref_acc, color="k", linestyle="--", alpha=0.7, label=f"Digital Reference ({ref_acc:.1f}%)", linewidth=lw)
+    ref_line = ax1.axhline(
+        y=ref_acc,
+        color="k",
+        linestyle="--",
+        alpha=0.7,
+        label=f"Digital Reference ({ref_acc:.1f}%)",
+        linewidth=lw,
+    )
     if param == "ler_std_dev":
         ax1.set_xlabel("Splitter Ratio Std. Dev.", fontsize=label_fs)
     else:
@@ -81,8 +92,12 @@ def _plot_sweep_on_axes(
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
 
     ax2 = ax1.twinx()
-    sndr_line = ax2.plot(strengths, sndrs, "r^-", label="SNDR (pJTC output)", markersize=ms, linewidth=lw)[0]
-    jps_line = ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)", markersize=ms, linewidth=lw)[0]
+    sndr_line = ax2.plot(
+        strengths, sndrs, "r^-", label="SNDR (pJTC output)", markersize=ms, linewidth=lw
+    )[0]
+    jps_line = ax2.plot(
+        strengths, jps_sndrs, "gs--", label="SNDR (JPS)", markersize=ms, linewidth=lw
+    )[0]
     ax2.set_ylabel("SNDR (dB)", color="r", fontsize=label_fs)
     ax2.set_ylim(SNDR_YLIM)
 
@@ -150,9 +165,17 @@ def _plot_fit_on_axes(
     ms = 3 if compact else 5
     label_fs = 9 if compact else DEFAULT_AXIS_LABEL_FONTSIZE
     # Draw lines and capture handles
-    line_ideal, = ax.plot(x, y_ref, "b-", label=f"Ideal (deg {ref_degree})", linewidth=lw)
-    line_poly, = ax.plot(x, y_poly, "r--", label=f"Poly fit (deg {degree}, R²={r_squared:.5f})", linewidth=lw)
-    line_data, = ax.plot(x, y, "k.", label="CSV data", markersize=ms)
+    (line_ideal,) = ax.plot(
+        x, y_ref, "b-", label=f"Ideal (deg {ref_degree})", linewidth=lw
+    )
+    (line_poly,) = ax.plot(
+        x,
+        y_poly,
+        "r--",
+        label=f"Poly fit (deg {degree}, R²={r_squared:.5f})",
+        linewidth=lw,
+    )
+    (line_data,) = ax.plot(x, y, "k.", label="CSV data", markersize=ms)
     ax.set_xlabel("Input", fontsize=label_fs)
     ax.set_ylabel("Output", fontsize=label_fs)
     if SHOW_TITLES and not compact:
@@ -161,7 +184,11 @@ def _plot_fit_on_axes(
     # Legend: top-left in specific order
     ax.legend(
         [line_ideal, line_poly, line_data],
-        [f"Ideal (deg {ref_degree})", f"Poly fit (deg {degree}, R²={r_squared:.5f})", "CSV data"],
+        [
+            f"Ideal (deg {ref_degree})",
+            f"Poly fit (deg {degree}, R²={r_squared:.5f})",
+            "CSV data",
+        ],
         loc="upper left",
         fontsize=legend_fs,
     )
@@ -244,17 +271,23 @@ def generate_combined_component_plots(
         figsize = (7.2, 3.4) if ieee_compact else (12, 4)
         fig, axes = plt.subplots(1, 2, figsize=figsize)
         # Right panel: distortion sweep; Left panel: CSV fit
-        _plot_sweep_on_axes(axes[1], param, strengths, accs, sndrs, jps_sndrs, compact=ieee_compact)
+        _plot_sweep_on_axes(
+            axes[1], param, strengths, accs, sndrs, jps_sndrs, compact=ieee_compact
+        )
 
         # Fit panel may be absent if CSV not available (e.g., LER)
         have_fit = False
         if csv_path:
-            have_fit = _plot_fit_on_axes(axes[0], csv_path, poly_order, tag, ref_degree, compact=ieee_compact)
+            have_fit = _plot_fit_on_axes(
+                axes[0], csv_path, poly_order, tag, ref_degree, compact=ieee_compact
+            )
 
         if not have_fit:
             axes[0].axis("off")
             if SHOW_TITLES:
-                axes[0].set_title("No fit data available", fontsize=DEFAULT_TITLE_FONTSIZE)
+                axes[0].set_title(
+                    "No fit data available", fontsize=DEFAULT_TITLE_FONTSIZE
+                )
 
         fig.tight_layout()
         out_path = os.path.join(out_dir, f"{tag}_combined.pdf")
@@ -264,18 +297,37 @@ def generate_combined_component_plots(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate combined distortion sweep + fit plots per component")
+    parser = argparse.ArgumentParser(
+        description="Generate combined distortion sweep + fit plots per component"
+    )
     parser.add_argument("--config", required=True, help="Path to YAML config file")
-    parser.add_argument("--sweep-dir", required=True, dest="sweep_dir", help="Directory containing *_results.txt from distortion_sweep")
-    parser.add_argument("--output-dir", default=None, dest="output_dir", help="Directory to save combined PDFs (defaults to config.output_dir)")
-    parser.add_argument("--include-ler", action="store_true", dest="include_ler", help="Include LER sweep (no fit panel)")
+    parser.add_argument(
+        "--sweep-dir",
+        required=True,
+        dest="sweep_dir",
+        help="Directory containing *_results.txt from distortion_sweep",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        dest="output_dir",
+        help="Directory to save combined PDFs (defaults to config.output_dir)",
+    )
+    parser.add_argument(
+        "--include-ler",
+        action="store_true",
+        dest="include_ler",
+        help="Include LER sweep (no fit panel)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
     cfg = load_config_from_yaml(args.config)
-    generate_combined_component_plots(cfg, args.sweep_dir, args.output_dir, args.include_ler)
+    generate_combined_component_plots(
+        cfg, args.sweep_dir, args.output_dir, args.include_ler
+    )
 
 
 if __name__ == "__main__":

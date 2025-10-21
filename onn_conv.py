@@ -113,7 +113,9 @@ class FFTConv2d(_ConvNd):
                 output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
         return output
 
-    def dot_product_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def dot_product_forward(
+        self, input: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
         raise NotImplementedError
 
     def tile_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

@@ -3,7 +3,6 @@
 Profiling script for ONN training to identify performance bottlenecks.
 """
 
-import os
 import sys
 from pathlib import Path
 

@@ -233,12 +233,18 @@ def train_onn_model(config: AppConfig) -> float:
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:
         try:
-            ckpt = torch.load(config.pretrained_weights, map_location=device, weights_only=False)
+            ckpt = torch.load(
+                config.pretrained_weights, map_location=device, weights_only=False
+            )
             state_dict = ckpt.get("model_state_dict", ckpt)
             model.load_state_dict(state_dict)
-            print(f"[INFO] Loaded pretrained weights for fine-tuning: {config.pretrained_weights}")
+            print(
+                f"[INFO] Loaded pretrained weights for fine-tuning: {config.pretrained_weights}"
+            )
         except Exception as e:
-            print(f"[WARN] Failed to load pretrained weights '{config.pretrained_weights}': {e}. Proceeding without.")
+            print(
+                f"[WARN] Failed to load pretrained weights '{config.pretrained_weights}': {e}. Proceeding without."
+            )
 
     # ---------------- Evaluation-only path ----------------
     if config.eval_only:

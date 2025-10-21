@@ -61,7 +61,9 @@ def _read_base_config(base_run_dir: str) -> AppConfig:
         with open(cfg_path, "r") as f:
             data = yaml.safe_load(f)
         if isinstance(data, dict):
-            valid = {k: v for k, v in data.items() if k in AppConfig.__dataclass_fields__}
+            valid = {
+                k: v for k, v in data.items() if k in AppConfig.__dataclass_fields__
+            }
             return AppConfig(**valid)
     except Exception:
         pass

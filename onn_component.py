@@ -639,7 +639,7 @@ class JTC(nn.Module):
         jps_pd = self.pd(jps_base)
         if "jps_pd" in stages:
             results["jps_pd"] = jps_pd[0, :].detach()
-        
+
         jps_tia = self.tia(jps_pd)
         if "jps_tia" in stages:
             results["jps_tia"] = jps_tia[0, :].detach()
@@ -688,7 +688,7 @@ class JTC(nn.Module):
         out_pd = self.pd(output_raw)
         if "output_pd" in stages:
             results["output_pd"] = out_pd[0, :].detach()
-        
+
         out_tia = self.tia(out_pd)
         if "output_tia" in stages:
             results["output_tia"] = out_tia[0, :].detach()
