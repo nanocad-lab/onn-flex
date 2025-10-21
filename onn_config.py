@@ -18,8 +18,8 @@ class AppConfig:
     jtc_total_field: int = 16  # total size of the JTC plane
 
     # Quantization parameters
-    dac_bits: int = 4
-    adc_bits: int = 6
+    dac_bits: Optional[int] = 4
+    adc_bits: Optional[int] = 6
     scale_output: str = "none"
 
     # Driver parameters
@@ -58,8 +58,7 @@ class AppConfig:
         False  # Use PyTorch conv2d with 'same' padding instead of JTC
     )
     use_fourier_conv: bool = False  # Use FFT-based convolution instead of JTC
-    quantize_fourier_plane: bool = False  # Quantize FFT plane (real/imag)
-    fourier_plane_bits: int = 6  # Bits for Fourier plane quantization
+    fourier_plane_bits: Optional[int] = 6  # Bits for Fourier plane quantization
 
     # Quantizer selection (single QAT block for all steps)
     # Options: 'ste_clipped', 'ste_maxscale', 'ios', 'mad', 'mph', 'pwl'

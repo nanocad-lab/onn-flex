@@ -248,8 +248,9 @@ class FTconvlayer(_ConvNd):
         x_conv = x.transpose(1, 2)  # B H 1 W -> B 1 H W
 
         # Quantize inputs (extra bit for sign)
-        x_conv = self._apply_quantizer(x_conv, self.config.dac_bits, domain="activation")
-        weight_conv = self._apply_quantizer(weight_conv, self.config.dac_bits, domain="weight")
+        if self.config.dac_bits is not None:
+            x_conv = self._apply_quantizer(x_conv, self.config.dac_bits, domain="activation")
+            weight_conv = self._apply_quantizer(weight_conv, self.config.dac_bits, domain="weight")
 
         # Apply convolution with same padding
         output = F.conv2d(x_conv, weight_conv, padding="same")  # B Cout H W
@@ -263,7 +264,8 @@ class FTconvlayer(_ConvNd):
             output = output / max_val
 
         # Apply output ADC quantization
-        output = self._apply_quantizer(output, self.config.adc_bits, domain="output")
+        if self.config.adc_bits is not None:
+            output = self._apply_quantizer(output, self.config.adc_bits, domain="output")
         return output
 
     def fourier_conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -288,8 +290,9 @@ class FTconvlayer(_ConvNd):
 
         cout = weight.shape[0]
 
-        x = self._apply_quantizer(x, self.config.dac_bits, domain="activation")
-        weight = self._apply_quantizer(weight, self.config.dac_bits, domain="weight")
+        if self.config.dac_bits is not None:
+            x = self._apply_quantizer(x, self.config.dac_bits, domain="activation")
+            weight = self._apply_quantizer(weight, self.config.dac_bits, domain="weight")
 
         # Repeat to pair each signal with each kernel (per-output channel)
         input_full = x.repeat(1, 1, cout, 1)  # B H Cout W
@@ -341,9 +344,8 @@ class FTconvlayer(_ConvNd):
         jps_batch = jps_batch / plane_size
 
         # Quantize at JPS if enabled (Fourier-plane quantization point)
-        if getattr(self.config, "quantize_fourier_plane", False):
-            qbits = getattr(self.config, "fourier_plane_bits", self.config.dac_bits)
-            jps_batch = self._apply_quantizer(jps_batch.real, qbits, domain="fourier")
+        if self.config.fourier_plane_bits is not None:
+            jps_batch = self._apply_quantizer(jps_batch.real, self.config.fourier_plane_bits, domain="fourier")
 
         # Back to output plane and take magnitude
         output_plane_fft = torch.fft.fft(jps_batch, dim=-1)
@@ -368,7 +370,9 @@ class FTconvlayer(_ConvNd):
         max_val = out.max()
         if self.config.scale_output == "adc" and max_val.item() > 0:
             out = out / max_val
-        out = self._apply_quantizer(out, self.config.adc_bits, domain="output")
+        
+        if self.config.adc_bits is not None:
+            out = self._apply_quantizer(out, self.config.adc_bits, domain="output")
         return out
 
     def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
