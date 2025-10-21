@@ -438,7 +438,7 @@ class FTconvlayer(_ConvNd):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         if self.hv_concat:
-            con`v_h = self.pseudo_forward(x, self.weights)
+            conv_h = self.pseudo_forward(x, self.weights)
             conv_v = self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
                 0, 1, 3, 2
             )
