@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.nn.modules.conv import _ConvNd
 from torch.nn.common_types import _size_2_t  # type: ignore
 from torch.nn.modules.utils import _pair
-from typing import Union  # Added List for _pair
+from typing import Union, Optional
 from onn_component import JTC
 
 # Helper for ceiling division if needed, though not directly used in the final version
@@ -32,7 +32,7 @@ class FFTConv2d(_ConvNd):
         bias: bool = True,
         padding_mode: str = "zeros",
         hw_size: int = 16,  # The fixed kernel size for the internal Conv1D
-        jtc: JTC = None,
+        jtc: Optional[JTC] = None,
     ):
         kernel_size = _pair(kernel_size)
         stride = _pair(stride)
@@ -66,9 +66,11 @@ class FFTConv2d(_ConvNd):
             self.register_parameter("bias", None)
         self.reset_parameters()
 
+        # Provide a default JTC instance if not supplied
+        self.jtc: JTC = jtc if jtc is not None else JTC(args)
         self.hardware_forward = self.jtc.forward
 
-    def pseudo_forward(self, input, weight):
+    def pseudo_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # Wrapper function for pseudo-negative implementation
         weight_p = weight[..., 0]
         weight_n = weight[..., 1]  # pseudo-negative
@@ -77,10 +79,10 @@ class FFTConv2d(_ConvNd):
         output = output_p - output_n
         return output
 
-    def forward(self, input, weight):
+    def forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         return self.pseudo_forward(input, weight)
 
-    def conv_forward(self, input, weight):
+    def conv_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         if self.args.conv_method == "patch":
             return self.patch_forward(input, weight)
         elif self.args.conv_method == "dot_product":
@@ -88,7 +90,7 @@ class FFTConv2d(_ConvNd):
         elif self.args.conv_method == "tile":
             return self.tile_forward(input, weight)
 
-    def patch_forward(self, input, weight):
+    def patch_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """
         Patch-wise convolution using a hardware-accelerated 1D conv. (from Shurui)
         """
@@ -111,10 +113,10 @@ class FFTConv2d(_ConvNd):
                 output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
         return output
 
-    def dot_product_forward(self, input, weight):
-        pass
+    def dot_product_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
 
-    def tile_forward(self, input, weight):
+    def tile_forward(self, input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """
         2D convolution via row-tiling and a hardware-accelerated 1D conv. (tiling_test_20250517.ipynb)
         """

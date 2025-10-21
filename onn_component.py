@@ -20,11 +20,12 @@ class QuantDequant_STE(torch.autograd.Function):
         return torch.round(input_clamped * (levels - 1)) / (levels - 1)
 
     @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output, None, None
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        # Return gradients for (input, bits)
+        return grad_output, None
 
 
-def _compute_linear_coeffs(csv_file: str):
+def _compute_linear_coeffs(csv_file: str) -> np.ndarray:
     """Compute coefficients a, b for y = a * x + b using first and last data points."""
     data = pd.read_csv(csv_file)
     x = data["input"].values
@@ -42,7 +43,7 @@ def _compute_linear_coeffs(csv_file: str):
     return np.array([a, b], dtype=np.float32)
 
 
-def _compute_quadratic_coeffs(csv_file: str):
+def _compute_quadratic_coeffs(csv_file: str) -> np.ndarray:
     """Compute coefficients a, b for y = a * x**2 + b using first and last data points."""
     data = pd.read_csv(csv_file)
     x = data["input"].values
@@ -62,7 +63,7 @@ def _compute_quadratic_coeffs(csv_file: str):
     return np.array([a, b], dtype=np.float32)
 
 
-def calculate_aic(y_true, y_pred, n_params):
+def calculate_aic(y_true: np.ndarray, y_pred: np.ndarray, n_params: int) -> float:
     """Calculate AIC for polynomial regression"""
     n = len(y_true)
     mse = np.mean((y_true - y_pred) ** 2)
@@ -71,7 +72,7 @@ def calculate_aic(y_true, y_pred, n_params):
     return aic
 
 
-def get_ideal_degree(csv_file, max_degree: int = 10):
+def get_ideal_degree(csv_file: str, max_degree: int = 10) -> int:
     """
     Fit polynomials to CSV data and print results
 
@@ -85,6 +86,8 @@ def get_ideal_degree(csv_file, max_degree: int = 10):
     y = data["output"].values
 
     last_aic = float("inf")
+    best_degree: int | None = None
+    best_aic = float("inf")
 
     for degree in range(1, max_degree + 1):
         coeffs = np.polyfit(x, y, degree)
@@ -94,24 +97,30 @@ def get_ideal_degree(csv_file, max_degree: int = 10):
         n_params = degree + 1  # coefficients + intercept
         aic = calculate_aic(y, y_pred, n_params)
         # print(f"degree: {degree}, r2: {r2}, aic: {aic}")
+        if aic < best_aic:
+            best_aic = aic
+            best_degree = degree
+
         if r2 > 0.9995:
             return degree
         elif aic > last_aic:
-            return degree - 1
+            # Stop if AIC worsens; prefer previous degree if available
+            return max(1, degree - 1)
         else:
             last_aic = aic
 
-    return "fail"
+    # Fallback to the best degree seen instead of returning a non-int sentinel
+    return best_degree if best_degree is not None else 1
 
 
-def get_io_ranges(csv_file: str):
+def get_io_ranges(csv_file: str) -> Tuple[float, float, float, float]:
     data = pd.read_csv(csv_file)
     x = data["input"].values
     y = data["output"].values
     return x.min(), x.max(), y.min(), y.max()
 
 
-def get_coeffs(csv_file, degree: int):
+def get_coeffs(csv_file: str, degree: int) -> np.ndarray:
     data = pd.read_csv(csv_file)
     x = data["input"].values
     y = data["output"].values
@@ -143,7 +152,7 @@ class Driver(nn.Module):
         # Distortion strength (0 -> ideal, 1 -> fitted polynomial)
         self.strength: float = float(self.config.driver_distortion_strength)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Polynomial evaluation using Horner's rule
         # print(f"x shape: {x.shape}")
         # print(f"x: {x[0]}")
@@ -188,7 +197,7 @@ class PD_TIA(nn.Module):
         # Distortion strength
         self.strength: float = float(self.config.pd_tia_distortion_strength)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Polynomial evaluation using Horner's rule
         x = torch.clamp(x, 1e-6, 1e-5)
         # print(f"pd_tia x shape: {x.shape}")
@@ -235,7 +244,7 @@ class PD(nn.Module):
         # Distortion strength
         self.strength: float = float(self.config.pd_distortion_strength)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.clamp(x, 1e-6, 1e-5)
         poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
@@ -271,7 +280,7 @@ class TIA(nn.Module):
         # Distortion strength
         self.strength: float = float(self.config.tia_distortion_strength)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
             poly_y = poly_y * x + a
@@ -331,7 +340,7 @@ class MRM(nn.Module):
         # Distortion strength for phase
         self.phase_strength: float = float(self.config.mrm_phase_distortion_strength)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Polynomial evaluation for power
         pwr_poly_y = torch.zeros_like(x, dtype=self.pwr_coeffs.dtype, device=x.device)
         for a in self.pwr_coeffs:
@@ -367,7 +376,7 @@ class LER_variation(nn.Module):
         self.dim = self.config.jtc_total_field
         self.ler_std_dev = self.config.ler_std_dev
 
-    def generate_ler_matrix(self, batch: int, length: int, device=None):
+    def generate_ler_matrix(self, batch: int, length: int, device=None) -> torch.Tensor:
         """
         Balanced splitter tree (Gaussian i.i.d. ratios) that:
         • Handles non-powers of two by building to the next power-of-two (m)
@@ -403,7 +412,7 @@ class LER_variation(nn.Module):
 
         return powers
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         ler_matrix = self.generate_ler_matrix(x.shape[0], x.shape[1], device=x.device)
         return torch.mul(x, ler_matrix)
 
@@ -414,7 +423,8 @@ class JTC(nn.Module):
         self.config = config
         self.driver = Driver(config)
         self.mrm = MRM(config)
-        self.pd_tia = PD_TIA(config)
+        self.pd = PD(config)
+        self.tia = TIA(config)
         self.jtc_half_size = config.jtc_half_size
         self.jtc_separation = config.jtc_separation
         self.jtc_total_field = config.jtc_total_field
@@ -428,7 +438,8 @@ class JTC(nn.Module):
             "input_plane_mrm_phase",
             "input_plane_mrm_pwr",
             "jps_raw",
-            "jps_pd_tia",
+            "jps_pd",
+            "jps_tia",
             "jps_scale",
             "jps_quant",
             "jps_quantdac",
@@ -436,25 +447,27 @@ class JTC(nn.Module):
             "jps_mrm_phase",
             "jps_mrm_pwr",
             "output_raw",
-            "output_pd_tia",
+            "output_pd",
+            "output_tia",
             "output_scale",
             "output_quant",
             "output_slice",
         ]
 
-    def input_distortion(self, x):
+    def input_distortion(self, x: torch.Tensor) -> torch.Tensor:
         x = QuantDequant_STE.apply(x, self.config.dac_bits)
         x = self.driver(x)
         x = self.mrm(x)
         return x
 
-    def output_distortion(self, x):
+    def output_distortion(self, x: torch.Tensor) -> torch.Tensor:
         x = x * self.loss
         if self.config.scale_output == "pd":
             x = self.scale_to_range(x, 1e-6, 1e-5)
-        x = self.pd_tia(x)
+        x = self.pd(x)
+        x = self.tia(x)
         if self.config.scale_output == "adc":
-            x = x / x.max()
+            x = x / x.max().clamp_min(1e-12)
         x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
 
@@ -535,10 +548,11 @@ class JTC(nn.Module):
 
     def scale_to_range(
         self, tensor: torch.Tensor, min_val: float = -30, max_val: float = -20
-    ):
+    ) -> torch.Tensor:
         tensor_min = tensor.min()
         tensor_max = tensor.max()
-        scaled = (tensor - tensor_min) / (tensor_max - tensor_min)  # Scale to [0,1]
+        denom = (tensor_max - tensor_min).clamp_min(1e-12)
+        scaled = (tensor - tensor_min) / denom  # Scale to [0,1]
         return scaled * (max_val - min_val) + min_val  # Scale to [min_val, max_val]
 
     def compute_stage_tensors(
@@ -546,7 +560,7 @@ class JTC(nn.Module):
         signal: torch.Tensor,
         kernel: torch.Tensor,
         stages: Tuple[str, ...] | None = None,
-    ) -> dict:
+    ) -> dict[str, torch.Tensor]:
         """Compute intermediate tensors for the requested pipeline stages.
 
         Returns a dict of 1D tensors per stage name, suitable for plotting.
@@ -622,15 +636,19 @@ class JTC(nn.Module):
         if self.config.scale_output == "pd":
             jps_base = self.scale_to_range(jps_base, 1e-6, 1e-5)
 
-        jps_pd_tia = self.pd_tia(jps_base)
-        if "jps_pd_tia" in stages:
-            results["jps_pd_tia"] = jps_pd_tia[0, :].detach()
+        jps_pd = self.pd(jps_base)
+        if "jps_pd" in stages:
+            results["jps_pd"] = jps_pd[0, :].detach()
+        
+        jps_tia = self.tia(jps_pd)
+        if "jps_tia" in stages:
+            results["jps_tia"] = jps_tia[0, :].detach()
 
         # Scale (ADC pre-scale)
         if self.config.scale_output == "adc":
-            jps_scaled = jps_pd_tia / jps_pd_tia.max()
+            jps_scaled = jps_tia / jps_tia.max().clamp_min(1e-12)
         else:
-            jps_scaled = jps_pd_tia
+            jps_scaled = jps_tia
         if "jps_scale" in stages:
             results["jps_scale"] = jps_scaled[0, :].detach()
         # Quantize (ADC bits)
@@ -667,14 +685,18 @@ class JTC(nn.Module):
         if self.config.scale_output == "pd":
             output_raw = self.scale_to_range(output_raw, 1e-6, 1e-5)
 
-        out_pd_tia = self.pd_tia(output_raw)
-        if "output_pd_tia" in stages:
-            results["output_pd_tia"] = out_pd_tia[0, :].detach()
+        out_pd = self.pd(output_raw)
+        if "output_pd" in stages:
+            results["output_pd"] = out_pd[0, :].detach()
+        
+        out_tia = self.tia(out_pd)
+        if "output_tia" in stages:
+            results["output_tia"] = out_tia[0, :].detach()
 
         if self.config.scale_output == "adc":
-            out_scaled = out_pd_tia / out_pd_tia.max()
+            out_scaled = out_tia / out_tia.max().clamp_min(1e-12)
         else:
-            out_scaled = out_pd_tia
+            out_scaled = out_tia
 
         if "output_scale" in stages:
             results["output_scale"] = out_scaled[0, :].detach()

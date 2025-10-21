@@ -1,5 +1,5 @@
 from dataclasses import replace
-from typing import Tuple
+from typing import Tuple, Any, Dict
 
 import torch
 import yaml
@@ -12,7 +12,7 @@ from onn_train import FFTConvNet, evaluate, get_data_loaders
 def load_config_from_yaml(path: str) -> AppConfig:
     """Load AppConfig from a YAML file."""
     with open(path, "r") as f:
-        data = yaml.safe_load(f)
+        data: Dict[str, Any] = yaml.safe_load(f)
     valid = {k: v for k, v in data.items() if k in AppConfig.__dataclass_fields__}
     return AppConfig(**valid)
 

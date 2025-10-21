@@ -1,7 +1,7 @@
 import argparse
 import os
 import yaml
-from typing import Optional
+from typing import Optional, Any, Dict
 from onn_train import train_onn_model
 from onn_config import AppConfig
 
@@ -28,10 +28,10 @@ def load_yaml_config(config_path: str) -> AppConfig:
     """Load application config from YAML file."""
     try:
         with open(config_path, "r") as f:
-            yaml_data = yaml.safe_load(f)
+            yaml_data: Dict[str, Any] = yaml.safe_load(f)
 
         # Filter out keys that don't exist in AppConfig
-        valid_config = {
+        valid_config: Dict[str, Any] = {
             k: v
             for k, v in yaml_data.items()
             if k in [field.name for field in AppConfig.__dataclass_fields__.values()]
@@ -44,6 +44,17 @@ def load_yaml_config(config_path: str) -> AppConfig:
     except Exception as e:
         print(f"Error loading config: {str(e)}. Using defaults.")
         return AppConfig()
+
+
+def _str2bool(v: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    val = v.strip().lower()
+    if val in {"yes", "true", "t", "1", "y"}:
+        return True
+    if val in {"no", "false", "f", "0", "n"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {v}")
 
 
 def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
@@ -252,6 +263,50 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.use_pytorch_conv,
         help="Use PyTorch conv2d with 'same' padding instead of JTC",
     )
+    parser.add_argument(
+        "--use-fourier-conv",
+        action="store_true",
+        default=yaml_config.use_fourier_conv,
+        help="Use FFT-based convolution instead of JTC",
+    )
+    parser.add_argument(
+        "--quantize-fourier-plane",
+        action="store_true",
+        default=yaml_config.quantize_fourier_plane,
+        help="Apply quantization to Fourier plane (real/imag parts)",
+    )
+    parser.add_argument(
+        "--fourier-plane-bits",
+        type=int,
+        default=yaml_config.fourier_plane_bits,
+        help="Quantization bits used in the Fourier plane",
+    )
+
+    # Quantizer selection (single)
+    parser.add_argument(
+        "--quantizer",
+        dest="quantizer",
+        type=str,
+        default=yaml_config.quantizer,
+        choices=[
+            "ste_clipped",
+            "ste_maxscale",
+            "ios",
+            "mad",
+            "mph",
+            "pwl",
+        ],
+        help="Quantizer type for activations, weights, outputs, and Fourier plane",
+    )
+
+    # Optional activation normalization inside identical blocks
+    parser.add_argument(
+        "--normalize-blocks",
+        dest="normalize_blocks",
+        action="store_true",
+        default=yaml_config.normalize_blocks,
+        help="Normalize activations after each identical block",
+    )
 
     # ------------------------------------------------------------------
     #  Training / model-related CLI overrides
@@ -301,9 +356,11 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
     parser.add_argument(
         "--run-pretrain-tests",
         dest="run_pretrain_tests",
-        type=bool,
+        type=_str2bool,
+        nargs="?",
+        const=True,
         default=yaml_config.run_pretrain_tests,
-        help="Run pretrain tests",
+        help="Run pretrain tests (true/false)",
     )
     parser.add_argument(
         "--pretrain-tests-only",
@@ -324,7 +381,7 @@ def save_config(config: AppConfig, output_dir: str) -> str:
     output_path = os.path.join(output_dir, "config.yaml")
 
     with open(output_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+        yaml.safe_dump(vars(config), f, default_flow_style=False)
 
     return output_path
 

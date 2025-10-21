@@ -57,6 +57,13 @@ class AppConfig:
     use_pytorch_conv: bool = (
         False  # Use PyTorch conv2d with 'same' padding instead of JTC
     )
+    use_fourier_conv: bool = False  # Use FFT-based convolution instead of JTC
+    quantize_fourier_plane: bool = False  # Quantize FFT plane (real/imag)
+    fourier_plane_bits: int = 6  # Bits for Fourier plane quantization
+
+    # Quantizer selection (single QAT block for all steps)
+    # Options: 'ste_clipped', 'ste_maxscale', 'ios', 'mad', 'mph', 'pwl'
+    quantizer: str = "ste_clipped"
 
     # ------------------------------------------------------------------
     #  Training / model-related CLI overrides
@@ -70,3 +77,5 @@ class AppConfig:
     run_pretrain_tests: bool = True
     pretrain_tests_only: bool = False
     loss: float = 0.96
+    # Whether to normalize activations after each identical block
+    normalize_blocks: bool = False

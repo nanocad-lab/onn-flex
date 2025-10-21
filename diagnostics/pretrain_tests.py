@@ -48,7 +48,7 @@ def _plot_fit(
 
     plt.figure(figsize=(6, 4))
     plt.plot(x, y, "k.", label="CSV data")
-    plt.plot(x, y_ref, "b-", label=f"Ref fit (deg {ref_order})")
+    plt.plot(x, y_ref, "b-", label=f"Ideal (deg {ref_order})")
     plt.plot(
         x,
         y_poly,
@@ -203,8 +203,8 @@ def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
 
     Uses `JTC.compute_stage_tensors` to retrieve the following stages (when available):
     input_plane, input_plane_quant, input_plane_driver, input_plane_mrm_phase,
-    input_plane_mrm_pwr, jps_raw, jps_pd_tia, jps_scale, jps_quant, jps_quantdac,
-    jps_driver, jps_mrm_phase, jps_mrm_pwr, output_raw, output_pd_tia, output_scale,
+    input_plane_mrm_pwr, jps_raw, jps_pd, jps_tia, jps_scale, jps_quant, jps_quantdac,
+    jps_driver, jps_mrm_phase, jps_mrm_pwr, output_raw, output_pd, output_tia, output_scale,
     output_quant, output_slice.
     """
     jtc = JTC(config)
@@ -336,3 +336,5 @@ def run_pretrain_tests(config: AppConfig) -> None:
         _stage_plots_detailed(config, config.output_dir)
     except Exception as e:
         print(f"[ERROR] Detailed JTC stage plots failed: {e}")
+
+__all__ = ["run_pretrain_tests"]

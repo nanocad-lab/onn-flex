@@ -3,6 +3,14 @@
 Profiling script for ONN training to identify performance bottlenecks.
 """
 
+import os
+import sys
+from pathlib import Path
+
+# Ensure repository root is on sys.path when run directly
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 import torch
 import torch.profiler
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -11,7 +19,7 @@ from onn_main import load_yaml_config
 from onn_config import AppConfig
 
 
-def profile_training():
+def profile_training() -> None:
     """Profile a few training iterations to identify bottlenecks."""
 
     # Setup

@@ -1,8 +1,13 @@
-import argparse
 import os
+import sys
+from pathlib import Path
+import argparse
 from dataclasses import replace
 
 import matplotlib.pyplot as plt
+# Ensure repository root is on sys.path when run directly
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 from plot_style import (
     apply_global_plot_style,
     DEFAULT_TICK_LABEL_FONTSIZE,
@@ -11,9 +16,13 @@ from plot_style import (
 )
 import numpy as np
 import torch
-from onn_inference import _build_jtc
 from typing import Iterable
 
+# Ensure repository root is on sys.path when run directly
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+from onn_inference import _build_jtc
 from onn_config import AppConfig
 from onn_inference import (
     compute_snr_enob,
@@ -27,13 +36,18 @@ apply_global_plot_style()
 
 PARAMS = [
     "driver_distortion_strength",
-    "pd_tia_distortion_strength",
+    "pd_distortion_strength",
+    "tia_distortion_strength",
     "mrm_power_distortion_strength",
     "mrm_phase_distortion_strength",
     "ler_std_dev",
 ]
 
-REF_DIGITAL_ACC = 67.51
+REF_DIGITAL_ACC = 60.13
+
+# Fixed y-axis limits for consistency across components
+ACC_YLIM = (0.0, 65.0)  # Accuracy in %
+SNDR_YLIM = (-10.0, 40.0)  # SNDR in dB
 
 
 def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
@@ -80,12 +94,15 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
     else:
         ax1.set_xlabel("Distortion Ratio (α)")
     ax1.set_ylabel("Inference Accuracy (%)", color="b")
+    # Fix y-axis limits for comparability
+    ax1.set_ylim(ACC_YLIM)
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
     ax2.plot(strengths, sndrs, "r^-", label="SNDR (pJTC output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
     ax2.set_ylabel("SNDR (dB)", color="r")
+    ax2.set_ylim(SNDR_YLIM)
     # Combine legends from both axes into a single legend
     handles1, labels1 = ax1.get_legend_handles_labels()
     handles2, labels2 = ax2.get_legend_handles_labels()
@@ -118,7 +135,12 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
     field_values = np.arange(16, 16 + acc_matrix.shape[1])  # Assuming min_field = 16
 
     # Heat-maps --------------------------------------------------------
-    def _plot_heat(data, filename, cbar_label, add_ref_line=False):
+    def _plot_heat(
+        data: np.ndarray,
+        filename: str,
+        cbar_label: str,
+        add_ref_line: bool = False,
+    ) -> None:
         fig, ax = plt.subplots()
         im = ax.imshow(data, origin="lower", cmap="viridis", interpolation="nearest")
         ax.set_xticks(np.arange(len(field_values)))
@@ -169,17 +191,13 @@ def _plot_jtc_2d_from_data(out_dir: str) -> None:
     )
     _plot_heat(sndr_out_matrix, "jtc_2d_sweep_output_sndr.pdf", "SNDR (dB)")
 
-    print(
-        "Generated JTC 2D sweep plots: jtc_2d_sweep_accuracy.pdf, jtc_2d_sweep_output_sndr.pdf"
-    )
-
 
 def _sweep_param(
     base_cfg: AppConfig,
     weights: str,
     param: str,
     out_dir: str,
-    strengths: Iterable[int],
+    strengths: Iterable[float],
 ) -> None:
     accs = []
     sndrs = []
@@ -220,12 +238,15 @@ def _sweep_param(
     else:
         ax1.set_xlabel("Distorted TF Ratio (α)")
     ax1.set_ylabel("Inference Accuracy (%)", color="b")
+    # Fix y-axis limits for comparability
+    ax1.set_ylim(ACC_YLIM)
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
     ax2.plot(strengths, sndrs, "r^-", label="SNDR (pJTC output)")
     ax2.plot(strengths, jps_sndrs, "gs--", label="SNDR (JPS)")
     ax2.set_ylabel("SNDR (dB)", color="r")
+    ax2.set_ylim(SNDR_YLIM)
     # Combine legends from both axes into a single legend
     handles1, labels1 = ax1.get_legend_handles_labels()
     handles2, labels2 = ax2.get_legend_handles_labels()
@@ -314,31 +335,21 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
             # Skip invalid combos (not enough plane length)
             if field < min_field + sep:
                 continue
-
             cfg = replace(
                 base_cfg,
                 jtc_separation=int(sep),
                 jtc_total_field=int(field),
             )
+            acc = run_inference(cfg, weights)
+            acc_matrix[i, j] = acc
+            sndr = _compute_jtc_sndrs(cfg, num_tests=200)
+            sndr_out_matrix[i, j] = sndr
 
-            try:
-                acc = run_inference(cfg, weights)
-                sndr = _compute_jtc_sndrs(cfg, num_tests=1000)
-
-                acc_matrix[i, j] = acc
-                sndr_out_matrix[i, j] = sndr
-
-                print(
-                    f"jtc_sep={sep}, jtc_total_field={field} -> acc {acc:.2f}% "
-                    f"SNDR_out {sndr:.2f}dB"
-                )
-            except ValueError as e:
-                print(f"[SKIP] sep={sep}, field={field}: {e}")
-
-    # Persist results
+    # Save matrices for later reuse / plotting
     np.save(os.path.join(out_dir, "jtc_2d_accuracy.npy"), acc_matrix)
     np.save(os.path.join(out_dir, "jtc_2d_sndr_output.npy"), sndr_out_matrix)
 
+    # Also export as text for quick inspection
     np.savetxt(
         os.path.join(out_dir, "jtc_2d_accuracy.txt"),
         acc_matrix,

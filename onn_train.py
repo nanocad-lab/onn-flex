@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from onn_layers import FTconvlayer
 from onn_config import AppConfig
-from onn_tests import run_pretrain_tests
+from diagnostics.pretrain_tests import run_pretrain_tests
 
 
 # -------------------------------
@@ -110,20 +110,25 @@ class FFTConvNet(nn.Module):
         self.maxpool2 = nn.MaxPool2d(2)
 
         # Configurable sequence of identical blocks
+        class _MaxNorm(nn.Module):
+            def forward(self, x: torch.Tensor):
+                return x / x.max().clamp_min(1e-12)
+
         blocks = []
         for _ in range(config.num_identical_layers):
-            blocks.append(
-                nn.Sequential(
-                    FTconvlayer(
-                        32,
-                        16,
-                        config=config,
-                        kernel_size=8,
-                        hv_concat=True,
-                    ),
-                    nn.ReLU(inplace=True),
-                )
-            )
+            seq = [
+                FTconvlayer(
+                    32,
+                    16,
+                    config=config,
+                    kernel_size=8,
+                    hv_concat=True,
+                ),
+                nn.ReLU(inplace=True),
+            ]
+            if getattr(config, "normalize_blocks", False):
+                seq.append(_MaxNorm())
+            blocks.append(nn.Sequential(*seq))
         self.blocks = nn.Sequential(*blocks)
 
         # Classifier (identical to original template)
@@ -135,16 +140,16 @@ class FFTConvNet(nn.Module):
         )
 
     # pylint: disable=arguments-differ
-    def forward(self, x):  # type: ignore[override]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
         x = self.maxpool1(x)
         x = F.relu(x)
-        x = x / x.max()
+        x = x / x.max().clamp_min(1e-12)
 
         x = self.conv2(x)
         x = self.maxpool2(x)
         x = F.relu(x)
-        x = x / x.max()
+        x = x / x.max().clamp_min(1e-12)
 
         x = self.blocks(x)
         x = self.classifier(x)
@@ -197,13 +202,16 @@ def save_checkpoint(
 # -------------------------------
 
 
-def train_onn_model(config: AppConfig):
+def train_onn_model(config: AppConfig) -> float:
     """Entry-point used by `onn_main.py`.
 
     * If `config.eval_only` is True, we load `config.pretrained_weights` and run
       a single evaluation pass.
     * Otherwise we train from scratch and export the best checkpoint as well as
-      the model structure under `config.output_dir`."""
+      the model structure under `config.output_dir`.
+
+    Returns the final test accuracy (percent) for training or eval-only runs.
+    """
 
     # -------------------------------------------------------------
     #  Pre-training diagnostics (plots & quick sanity checks)
@@ -212,7 +220,7 @@ def train_onn_model(config: AppConfig):
         run_pretrain_tests(config)
         if config.pretrain_tests_only:
             print("[INFO] Pretrain tests only requested; exiting without training.")
-            return
+            return float("nan")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -222,6 +230,16 @@ def train_onn_model(config: AppConfig):
     # Build model
     model = FFTConvNet(config).to(device)
 
+    # Optionally load pretrained weights for fine-tuning
+    if not config.eval_only and config.pretrained_weights:
+        try:
+            ckpt = torch.load(config.pretrained_weights, map_location=device, weights_only=False)
+            state_dict = ckpt.get("model_state_dict", ckpt)
+            model.load_state_dict(state_dict)
+            print(f"[INFO] Loaded pretrained weights for fine-tuning: {config.pretrained_weights}")
+        except Exception as e:
+            print(f"[WARN] Failed to load pretrained weights '{config.pretrained_weights}': {e}. Proceeding without.")
+
     # ---------------- Evaluation-only path ----------------
     if config.eval_only:
         if not config.pretrained_weights:
@@ -230,7 +248,7 @@ def train_onn_model(config: AppConfig):
         model.load_state_dict(ckpt["model_state_dict"])
         test_acc = evaluate(model, testloader, device)
         print(f"Test accuracy: {test_acc:.2f}%")
-        return
+        return test_acc
 
     # ---------------- Training path -----------------------
     criterion = nn.CrossEntropyLoss()
@@ -240,6 +258,7 @@ def train_onn_model(config: AppConfig):
     best_acc = 0.0
     scaler = GradScaler() if device.type == "cuda" else None
 
+    last_epoch_test_acc = 0.0
     for epoch in range(config.num_epochs):
         model.train()
         running_loss = 0.0
@@ -271,6 +290,7 @@ def train_onn_model(config: AppConfig):
 
         # Evaluate
         test_acc = evaluate(model, testloader, device)
+        last_epoch_test_acc = test_acc
         train_acc = evaluate(model, trainloader, device)
         best_acc = max(best_acc, test_acc)
         print(
@@ -294,5 +314,6 @@ def train_onn_model(config: AppConfig):
         yaml.dump(vars(config), f)
 
     print(
-        f"Training finished. Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
+        f"Training finished. Last epoch test accuracy: {last_epoch_test_acc:.2f}% | Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
     )
+    return last_epoch_test_acc

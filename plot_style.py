@@ -16,7 +16,7 @@ Exports:
 from __future__ import annotations
 
 from typing import Dict, Any
-
+import seaborn as sns
 
 # Single global knobs for plot styling
 DEFAULT_AXIS_LABEL_FONTSIZE: int = 16
@@ -54,7 +54,7 @@ def apply_global_plot_style(
         import matplotlib as _mpl  # Local import to avoid hard dependency at import time
     except Exception:
         return
-
+    sns.set_theme(context="paper", style="whitegrid", font="serif")
     axis_size: int = (
         int(axis_label_fontsize)
         if axis_label_fontsize is not None

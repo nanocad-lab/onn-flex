@@ -8,18 +8,22 @@ pre-defined YAML configurations located under the `configs/` directory::
     configs/config_worst.yaml
     configs/config_worst_corr.yaml
 
-Each run writes its outputs to a dedicated sub-directory under `runs/`
-that matches the config’s base-name (e.g. `runs/config_ideal/`).
+Each run writes its outputs to a dedicated sub-directory under `runs_mfd/`
+that matches the config’s base-name (e.g. `runs_mfd/config_ideal/`).
 """
 
 from __future__ import annotations
 
-# Standard library
+import sys
 from pathlib import Path
 from typing import List
 
 import argparse
 import yaml
+
+# Ensure repository root is on sys.path when run directly
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from onn_config import AppConfig
 from onn_train import train_onn_model
@@ -28,8 +32,9 @@ from onn_train import train_onn_model
 #  Constants
 # -----------------------------------------------------------------------------
 
-CONFIG_DIR = Path(__file__).resolve().parent / "configs"
-RUNS_DIR = Path(__file__).resolve().parent / "runs_mfd"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_DIR = REPO_ROOT / "configs"
+RUNS_DIR = REPO_ROOT / "runs_mfd"
 
 # Explicit list to guarantee execution order.
 CONFIG_FILES: List[str] = [
@@ -111,3 +116,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
