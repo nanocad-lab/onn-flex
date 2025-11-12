@@ -256,30 +256,19 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Polynomial fit order for MRM phase",
     )
 
-    # Conv method parameters
+    # Conv backend selection
     parser.add_argument(
-        "--use-pytorch-conv",
-        action="store_true",
-        default=yaml_config.use_pytorch_conv,
-        help="Use PyTorch conv2d with 'same' padding instead of JTC",
-    )
-    parser.add_argument(
-        "--use-fourier-conv",
-        action="store_true",
-        default=yaml_config.use_fourier_conv,
-        help="Use FFT-based convolution instead of JTC",
-    )
-    parser.add_argument(
-        "--quantize-fourier-plane",
-        action="store_true",
-        default=yaml_config.quantize_fourier_plane,
-        help="Apply quantization to Fourier plane (real/imag parts)",
+        "--conv-backend",
+        type=str,
+        default=yaml_config.conv_backend,
+        choices=["pytorch", "fourier", "jtc"],
+        help="Convolution backend: 'pytorch' (Conv2d), 'fourier' (FFT-based), or 'jtc' (hardware emulation)",
     )
     parser.add_argument(
         "--fourier-plane-bits",
         type=int,
         default=yaml_config.fourier_plane_bits,
-        help="Quantization bits used in the Fourier plane",
+        help="Quantization bits used in the Fourier plane (applies to fourier and jtc backends)",
     )
 
     # Quantizer selection (single)

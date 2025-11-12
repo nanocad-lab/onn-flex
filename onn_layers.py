@@ -414,18 +414,20 @@ class FTconvlayer(_ConvNd):
 
             for i_p in range(n_patch):
                 patch = x_c[..., 8 * i_p : 8 * i_p + 8]
-                if self.config.use_pytorch_conv:
+                if self.config.conv_backend == "pytorch":
                     system_out = self.pytorch_conv_forward(patch, weight_c).permute(
                         0, 2, 3, 1
                     )
-                elif self.config.use_fourier_conv:
+                elif self.config.conv_backend == "fourier":
                     system_out = self.fourier_conv_forward(patch, weight_c).permute(
                         0, 2, 3, 1
                     )
-                else:
+                elif self.config.conv_backend == "jtc":
                     system_out = self.hardware_forward(patch, weight_c).permute(
                         0, 2, 3, 1
                     )
+                else:
+                    raise ValueError(f"Unknown conv_backend: {self.config.conv_backend}. Must be 'pytorch', 'fourier', or 'jtc'.")
                 output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
         return output
 

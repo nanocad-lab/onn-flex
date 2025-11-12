@@ -429,6 +429,10 @@ class JTC(nn.Module):
         self.jtc_separation = config.jtc_separation
         self.jtc_total_field = config.jtc_total_field
         self.loss = float(config.loss)
+        # Persist only the quantizer name (avoid lambdas for pickle safety)
+        self.quantizer_name = (
+            getattr(self.config, "quantizer", "ste_clipped") or "ste_clipped"
+        )
 
         # Ordered list of available stage names
         self.stage_order = [
@@ -453,6 +457,42 @@ class JTC(nn.Module):
             "output_quant",
             "output_slice",
         ]
+
+    def _apply_quantizer(
+        self, tensor: torch.Tensor, bits: int, domain: str
+    ) -> torch.Tensor:
+        """Apply configured quantizer by name for the given domain.
+        domain in {activation, weight, output, fourier} controls signedness.
+        Uses local imports to avoid circular dependencies.
+        """
+        # Import quantizer classes locally to avoid circular imports
+        from onn_layers import (
+            QAT_STE,
+            QAT_STE_maxscale,
+            QAT_IOS,
+            QAT_MAD,
+            QAT_MPH,
+            QAT_PWL,
+        )
+
+        name = self.quantizer_name
+        signed_for_domain = domain in ("weight",)
+        is_weight_flag = domain in ("weight",)
+
+        if name == "ste_clipped":
+            return QAT_STE.apply(tensor, int(bits))
+        if name == "ste_maxscale":
+            return QAT_STE_maxscale.apply(tensor, int(bits))
+        if name == "ios":
+            return QAT_IOS.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
+        if name == "mad":
+            return QAT_MAD.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
+        if name == "mph":
+            return QAT_MPH.apply(tensor, int(bits), 1.0, bool(is_weight_flag))
+        if name == "pwl":
+            return QAT_PWL.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
+        # default fallback
+        return QAT_STE.apply(tensor, int(bits))
 
     def input_distortion(self, x: torch.Tensor) -> torch.Tensor:
         x = QuantDequant_STE.apply(x, self.config.dac_bits)
@@ -516,7 +556,16 @@ class JTC(nn.Module):
 
     def post_output_distortion(self, jft: torch.Tensor) -> torch.Tensor:
         """Apply output distortion after the Fourier plane."""
-        jps = self.output_distortion(torch.abs(jft))
+        jps = torch.abs(jft) ** 2
+        jps = jps / self.jtc_total_field
+
+        # Apply fourier plane quantization if enabled
+        if self.config.fourier_plane_bits is not None:
+            jps = self._apply_quantizer(
+                jps, self.config.fourier_plane_bits, domain="fourier"
+            )
+
+        jps = self.output_distortion(jps)
         return jps
 
     def inverse_output(self, jps: torch.Tensor) -> torch.Tensor:

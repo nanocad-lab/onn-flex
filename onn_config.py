@@ -54,11 +54,9 @@ class AppConfig:
     ler_std_dev: float = 0.0
 
     conv_method: str = "patch"  # "patch" or "dot_product" or "tile"
-    use_pytorch_conv: bool = (
-        False  # Use PyTorch conv2d with 'same' padding instead of JTC
-    )
-    use_fourier_conv: bool = False  # Use FFT-based convolution instead of JTC
-    fourier_plane_bits: Optional[int] = 6  # Bits for Fourier plane quantization
+    # Backend selector: "pytorch", "fourier", or "jtc" (default)
+    conv_backend: str = "jtc"
+    fourier_plane_bits: Optional[int] = 6  # Bits for Fourier plane quantization (used by fourier and jtc backends)
 
     # Quantizer selection (single QAT block for all steps)
     # Options: 'ste_clipped', 'ste_maxscale', 'ios', 'mad', 'mph', 'pwl'
