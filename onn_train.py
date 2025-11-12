@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import os
 import yaml
+from dataclasses import fields as dataclass_fields
 from typing import Tuple
 
 import torch
@@ -16,6 +18,12 @@ from tqdm import tqdm
 from onn_layers import FTconvlayer
 from onn_config import AppConfig
 from diagnostics.pretrain_tests import run_pretrain_tests
+
+DISTORTION_STRENGTH_FIELDS = [
+    f.name
+    for f in dataclass_fields(AppConfig)
+    if f.name.endswith("_distortion_strength")
+]
 
 
 # -------------------------------
@@ -182,6 +190,35 @@ def evaluate(
     return acc
 
 
+def run_full_strength_inference(
+    model: nn.Module,
+    config: AppConfig,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+) -> float:
+    if not DISTORTION_STRENGTH_FIELDS:
+        return float("nan")
+
+    distortion_config = copy.deepcopy(config)
+    for field in DISTORTION_STRENGTH_FIELDS:
+        setattr(distortion_config, field, 1.0)
+
+    ref_model = FFTConvNet(distortion_config).to(device)
+    ref_model.load_state_dict(model.state_dict())
+
+    try:
+        print(
+            "[INFO] Running inference with all distortion strength parameters set to 1.0"
+        )
+        acc = evaluate(ref_model, dataloader, device)
+    finally:
+        if device.type == "cuda":
+            ref_model.to("cpu")
+            torch.cuda.empty_cache()
+        del ref_model
+    return acc
+
+
 def save_checkpoint(
     model: nn.Module, config: AppConfig, best_acc: float, filename: str
 ) -> None:
@@ -307,6 +344,13 @@ def train_onn_model(config: AppConfig) -> float:
                 "best_acc": f"{best_acc:.2f}",
                 "loss": f"{running_loss / len(trainloader):.3f}",
             }
+        )
+
+    distortion_acc = None
+    if DISTORTION_STRENGTH_FIELDS:
+        distortion_acc = run_full_strength_inference(model, config, testloader, device)
+        print(
+            f"[INFO] Accuracy with all distortion strengths set to 1.0: {distortion_acc:.2f}%"
         )
 
     # ---------------- Export -------------------------------

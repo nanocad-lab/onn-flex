@@ -147,9 +147,14 @@ def _plot_fit_on_axes(
     x = data["input"].values
     y = data["output"].values
 
-    # Reference behaviour (linear or provided)
-    ref_coeff = np.polyfit(x, y, ref_degree)
-    y_ref = np.polyval(ref_coeff, x)
+    # Reference behaviour (linear fit unless overridden per component)
+    if tag == "mrm_phase":
+        y_ref = np.zeros_like(x)
+        ref_label = "Ideal (0.0)"
+    else:
+        ref_coeff = np.polyfit(x, y, ref_degree)
+        y_ref = np.polyval(ref_coeff, x)
+        ref_label = f"Ideal (deg {ref_degree})"
 
     # Distortion polynomial fit
     degree = poly_order or get_ideal_degree(csv_path)
@@ -165,9 +170,7 @@ def _plot_fit_on_axes(
     ms = 3 if compact else 5
     label_fs = 9 if compact else DEFAULT_AXIS_LABEL_FONTSIZE
     # Draw lines and capture handles
-    (line_ideal,) = ax.plot(
-        x, y_ref, "b-", label=f"Ideal (deg {ref_degree})", linewidth=lw
-    )
+    (line_ideal,) = ax.plot(x, y_ref, "b-", label=ref_label, linewidth=lw)
     (line_poly,) = ax.plot(
         x,
         y_poly,
@@ -184,11 +187,7 @@ def _plot_fit_on_axes(
     # Legend: top-left in specific order
     ax.legend(
         [line_ideal, line_poly, line_data],
-        [
-            f"Ideal (deg {ref_degree})",
-            f"Poly fit (deg {degree}, R²={r_squared:.5f})",
-            "CSV data",
-        ],
+        [ref_label, f"Poly fit (deg {degree}, R²={r_squared:.5f})", "CSV data"],
         loc="upper left",
         fontsize=legend_fs,
     )

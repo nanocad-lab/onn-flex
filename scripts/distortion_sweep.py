@@ -48,7 +48,7 @@ REF_DIGITAL_ACC = 60.13
 
 # Fixed y-axis limits for consistency across components
 ACC_YLIM = (0.0, 65.0)  # Accuracy in %
-SNDR_YLIM = (-10.0, 40.0)  # SNDR in dB
+SNDR_YLIM = (-10.0, 55.0)  # SNDR in dB
 
 
 def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:

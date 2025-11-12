@@ -24,7 +24,7 @@ def _plot_fit(
     y: np.ndarray,
     y_ref: np.ndarray,
     y_poly: np.ndarray,
-    ref_order: int,
+    ref_label: str,
     poly_order: int,
     title: str,
     save_path: str,
@@ -36,7 +36,7 @@ def _plot_fit(
         y: Output values from the CSV.
         y_ref: Values predicted by the reference fit (typically linear).
         y_poly: Values predicted by the polynomial distortion fit.
-        ref_order: Order of the reference polynomial used for *y_ref*.
+        ref_label: Legend label describing the reference curve.
         poly_order: Order of the distortion polynomial used for *y_poly*.
         title: Title for the plot.
         save_path: Where to save the PNG.
@@ -48,7 +48,7 @@ def _plot_fit(
 
     plt.figure(figsize=(6, 4))
     plt.plot(x, y, "k.", label="CSV data")
-    plt.plot(x, y_ref, "b-", label=f"Ideal (deg {ref_order})")
+    plt.plot(x, y_ref, "b-", label=ref_label)
     plt.plot(
         x,
         y_poly,
@@ -79,7 +79,7 @@ def _sweep_and_plot(
         degree: Order of the main polynomial used to model distortion.
         output_dir: Where to write the PNG plot.
         tag: Descriptive tag inserted into the file name and plot title.
-        ref_degree: Order of the reference polynomial (defaults to 1 → linear).
+        ref_degree: Order of the reference polynomial (defaults to 1 → linear; ignored for mrm_phase).
     """
     if not os.path.exists(csv_path):
         print(f"[WARNING] CSV file not found: {csv_path}. Skipping {tag} plot.")
@@ -89,9 +89,14 @@ def _sweep_and_plot(
     x = data["input"].values
     y = data["output"].values
 
-    # Reference behaviour (could be linear or higher order)
-    ref_coeff = np.polyfit(x, y, ref_degree)
-    y_ref = np.polyval(ref_coeff, x)
+    # Reference behaviour (linear fit unless overridden per component)
+    if tag == "mrm_phase":
+        y_ref = np.zeros_like(x)
+        ref_label = "Ideal (0.0)"
+    else:
+        ref_coeff = np.polyfit(x, y, ref_degree)
+        y_ref = np.polyval(ref_coeff, x)
+        ref_label = f"Ideal (deg {ref_degree})"
 
     # Distortion polynomial fit
     poly_coeff = get_coeffs(csv_path, degree)
@@ -104,7 +109,7 @@ def _sweep_and_plot(
         y,
         y_ref,
         y_poly,
-        ref_degree,
+        ref_label,
         degree,
         f"{tag} distortion fit",
         plot_path,
