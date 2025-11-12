@@ -471,64 +471,15 @@ class JTC(nn.Module):
         x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
 
-    def generate_input_plane(
-        self, signal: torch.Tensor, kernel: torch.Tensor
-    ) -> torch.Tensor:
-        """Apply input distortion and build the JTC input plane."""
-        B = signal.shape[0]
-        M = signal.shape[-1]
-        N = kernel.shape[-1]
-        # signal/kernel shapes are Bx32, 8
-        # print(f"signal shape: {signal.shape}")
-        # print(f"kernel shape: {kernel.shape}")
+    def fft_and_magnitude(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply FFT, fftshift, and take magnitude."""
+        x = torch.fft.fft(x)
+        x = torch.fft.fftshift(x)  # DC in center for optical lens
+        return torch.abs(x)
 
-        if M > self.jtc_half_size:
-            raise ValueError("Signal length is greater than JTC half size")
-        if N > self.jtc_half_size:
-            raise ValueError("Kernel length is greater than JTC half size")
-        if M + N + self.jtc_separation > self.jtc_total_field:
-            raise ValueError("Not enough JTC field")
-
-        kernel_distorted = self.input_distortion(kernel)
-        signal_distorted = self.input_distortion(signal)
-
-        kernel_start = 0
-        kernel_end = kernel_start + N
-
-        signal_start = kernel_end + self.jtc_separation
-        signal_end = signal_start + M
-
-        input_plane = torch.zeros(
-            B,
-            self.jtc_total_field,
-            dtype=torch.complex64,
-            device=kernel_distorted.device,
-        )
-        input_plane[..., kernel_start:kernel_end] = kernel_distorted
-        input_plane[..., signal_start:signal_end] = signal_distorted
-        return input_plane
-
-    def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
-        """Perform FFT and shift the result."""
-        jft = torch.fft.fft(input_plane)
-        jft = torch.fft.fftshift(jft)  # DC in center for optical lens
-        return jft
-
-    def post_output_distortion(self, jft: torch.Tensor) -> torch.Tensor:
-        """Apply output distortion after the Fourier plane."""
-        jps = self.output_distortion(torch.abs(jft))
-        return jps
-
-    def inverse_output(self, jps: torch.Tensor) -> torch.Tensor:
-        """Propagate back to the detector plane and crop the result."""
-        jps = self.input_distortion(jps)
-
-        output_plane = torch.fft.fft(jps)
-        output_plane = torch.fft.fftshift(output_plane)  # DC in center for optical lens
-        output_plane = torch.abs(output_plane)
-        output_plane = self.output_distortion(output_plane)
-
-        same_indices = (
+    def compute_correlation_indices(self, device) -> torch.Tensor:
+        """Compute the indices for extracting correlation output."""
+        return (
             torch.arange(
                 self.jtc_total_field // 2
                 + self.jtc_separation
@@ -539,12 +490,94 @@ class JTC(nn.Module):
                 + self.jtc_half_size // 2
                 + 1
                 + self.jtc_half_size,
-                device=jps.device,
+                device=device,
             )
             % self.jtc_total_field
         )
-        output_slice = output_plane[..., same_indices]
-        return output_slice
+
+    def build_input_plane(
+        self, signal: torch.Tensor, kernel: torch.Tensor
+    ) -> torch.Tensor:
+        """Build JTC input plane from distorted signal and kernel.
+
+        Args:
+            signal: Distorted signal tensor (already passed through input_distortion)
+            kernel: Distorted kernel tensor (already passed through input_distortion)
+
+        Returns:
+            Complex input plane with signal and kernel placed at correct positions
+        """
+        B = signal.shape[0]
+        M = signal.shape[-1]
+        N = kernel.shape[-1]
+
+        # Validation
+        if M > self.jtc_half_size:
+            raise ValueError("Signal length is greater than JTC half size")
+        if N > self.jtc_half_size:
+            raise ValueError("Kernel length is greater than JTC half size")
+        if M + N + self.jtc_separation > self.jtc_total_field:
+            raise ValueError("Not enough JTC field")
+
+        # Calculate positions
+        kernel_start = 0
+        kernel_end = kernel_start + N
+        signal_start = kernel_end + self.jtc_separation
+        signal_end = signal_start + M
+
+        # Build plane
+        input_plane = torch.zeros(
+            B,
+            self.jtc_total_field,
+            dtype=torch.complex64,
+            device=signal.device,
+        )
+        input_plane[..., kernel_start:kernel_end] = kernel
+        input_plane[..., signal_start:signal_end] = signal
+        return input_plane
+
+    # Backward compatibility wrappers (deprecated - use new methods instead)
+    def generate_input_plane(
+        self, signal: torch.Tensor, kernel: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply input distortion and build the JTC input plane.
+
+        DEPRECATED: This method is kept for backward compatibility.
+        Use input_distortion() and build_input_plane() separately instead.
+        """
+        kernel_distorted = self.input_distortion(kernel)
+        signal_distorted = self.input_distortion(signal)
+        return self.build_input_plane(signal_distorted, kernel_distorted)
+
+    def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
+        """Perform FFT and shift the result.
+
+        DEPRECATED: This method is kept for backward compatibility.
+        Use fft_and_magnitude() or inline torch.fft operations instead.
+        """
+        jft = torch.fft.fft(input_plane)
+        jft = torch.fft.fftshift(jft)
+        return jft
+
+    def post_output_distortion(self, jft: torch.Tensor) -> torch.Tensor:
+        """Apply output distortion after the Fourier plane.
+
+        DEPRECATED: This method is kept for backward compatibility.
+        Use output_distortion(torch.abs(jft)) instead.
+        """
+        return self.output_distortion(torch.abs(jft))
+
+    def inverse_output(self, jps: torch.Tensor) -> torch.Tensor:
+        """Propagate back to the detector plane and crop the result.
+
+        DEPRECATED: This method is kept for backward compatibility.
+        The forward method now implements this logic using unified helper methods.
+        """
+        jps_distorted = self.input_distortion(jps)
+        output_plane = self.fft_and_magnitude(jps_distorted)
+        output_plane = self.output_distortion(output_plane)
+        indices = self.compute_correlation_indices(output_plane.device)
+        return output_plane[..., indices]
 
     def scale_to_range(
         self, tensor: torch.Tensor, min_val: float = -30, max_val: float = -20
@@ -624,8 +657,9 @@ class JTC(nn.Module):
         # For propagation, reuse the complex input plane computed above
         input_plane_full = plane_mrm
 
-        # Fourier plane
-        jft = self.post_fft(input_plane_full)
+        # Fourier plane (FFT + fftshift)
+        jft = torch.fft.fft(input_plane_full)
+        jft = torch.fft.fftshift(jft)
         if "jps_raw" in stages:
             results["jps_raw"] = torch.abs(jft)[0, :].detach()
 
@@ -705,21 +739,7 @@ class JTC(nn.Module):
         if "output_quant" in stages:
             results["output_quant"] = out_quant[0, :].detach()
 
-        same_indices = (
-            torch.arange(
-                self.jtc_total_field // 2
-                + self.jtc_separation
-                + self.jtc_half_size // 2
-                + 1,
-                self.jtc_total_field // 2
-                + self.jtc_separation
-                + self.jtc_half_size // 2
-                + 1
-                + self.jtc_half_size,
-                device=jps_complex.device,
-            )
-            % self.jtc_total_field
-        )
+        same_indices = self.compute_correlation_indices(jps_complex.device)
         output_slice = out_quant[..., same_indices]
         if "output_slice" in stages:
             results["output_slice"] = output_slice[0, :].detach()
@@ -727,10 +747,25 @@ class JTC(nn.Module):
         return results
 
     def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        # signal B H 1 W
-        # kernel Cout W
-        # print(f" JTC signal shape: {signal.shape}")
-        # print(f" JTC kernel shape: {kernel.shape}")
+        """Joint Transform Correlator forward pass.
+
+        Pipeline:
+        1. Input distortion (signal & kernel)
+        2. FFT
+        3. Output distortion
+        4. Input distortion
+        5. FFT
+        6. Output distortion
+        7. Index selection
+
+        Args:
+            signal: Input signal tensor (B, H, 1, W)
+            kernel: Kernel weights tensor (Cout, W)
+
+        Returns:
+            Correlation output tensor (B, H, Cout, W)
+        """
+        # Reshape inputs for batch processing
         signal_full = signal.repeat(1, 1, kernel.shape[0], 1)
         kernel_full = kernel.repeat(signal.shape[0], signal.shape[1], 1, 1)
         batch_size_for_jtc = (
@@ -738,16 +773,33 @@ class JTC(nn.Module):
         )
         signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.jtc_half_size)
         kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.jtc_half_size)
-        input_plane = self.generate_input_plane(signal_reshaped, kernel_reshaped)
-        jft = self.post_fft(input_plane)
-        jps = self.post_output_distortion(jft)
-        # print(f"jps shape: ", jps.shape)
-        # print("jps: ", jps[..., :8])
-        # print(f"max: {jps.max()}, min: {jps.min()}")
-        # input("Press Enter to continue...")
-        inverse_output = self.inverse_output(jps)
 
-        output_reshaped = inverse_output.reshape(
+        # Step 1: Input distortion (signal & kernel)
+        signal_distorted = self.input_distortion(signal_reshaped)
+        kernel_distorted = self.input_distortion(kernel_reshaped)
+        input_plane = self.build_input_plane(signal_distorted, kernel_distorted)
+
+        # Step 2: FFT
+        jft = self.fft_and_magnitude(input_plane)
+
+        # Step 3: Output distortion
+        jps = self.output_distortion(jft)
+
+        # Step 4: Input distortion
+        jps_distorted = self.input_distortion(jps)
+
+        # Step 5: FFT
+        output_plane = self.fft_and_magnitude(jps_distorted)
+
+        # Step 6: Output distortion
+        output_plane = self.output_distortion(output_plane)
+
+        # Step 7: Index selection
+        indices = self.compute_correlation_indices(output_plane.device)
+        output = output_plane[..., indices]
+
+        # Reshape output
+        output_reshaped = output.reshape(
             signal_full.shape[0],
             signal_full.shape[1],
             signal_full.shape[2],
