@@ -246,41 +246,26 @@ class FTconvlayer(_ConvNd):
         """
         import warnings
 
-        if backend == "pytorch":
-            # PyTorch conv2d is flexible with sizes
-            pass
-        elif backend == "fourier":
-            # Fourier backend requires kernel_size (typically 8)
-            if x.shape[-1] != self.kernel_size or weight.shape[-1] != self.kernel_size:
-                raise ValueError(
-                    f"Fourier backend requires input and weight width to be {self.kernel_size}. "
-                    f"Got input width={x.shape[-1]}, weight width={weight.shape[-1]}"
-                )
-            # Check JTC plane sizing
-            required_size = 2 * self.kernel_size + self.config.jtc_separation
-            if self.config.jtc_total_field < required_size:
-                warnings.warn(
-                    f"JTC total field ({self.config.jtc_total_field}) is smaller than "
-                    f"recommended size ({required_size} = 2*kernel_size + separation). "
-                    f"This may cause aliasing artifacts.",
-                    UserWarning
-                )
-        elif backend == "jtc_emulation":
-            # JTC emulation has same constraints as fourier
-            if x.shape[-1] != self.kernel_size or weight.shape[-1] != self.kernel_size:
-                raise ValueError(
-                    f"JTC emulation backend requires input and weight width to be {self.kernel_size}. "
-                    f"Got input width={x.shape[-1]}, weight width={weight.shape[-1]}"
-                )
-            # Check JTC plane sizing
-            required_size = 2 * self.kernel_size + self.config.jtc_separation
-            if self.config.jtc_total_field < required_size:
-                warnings.warn(
-                    f"JTC total field ({self.config.jtc_total_field}) is smaller than "
-                    f"recommended size ({required_size} = 2*kernel_size + separation). "
-                    f"This may cause aliasing artifacts.",
-                    UserWarning
-                )
+        match backend:
+            case "pytorch":
+                # PyTorch conv2d is flexible with sizes
+                pass
+            case "fourier" | "jtc_emulation":
+                # Both fourier and jtc_emulation have same size constraints
+                if x.shape[-1] != self.kernel_size or weight.shape[-1] != self.kernel_size:
+                    raise ValueError(
+                        f"{backend.replace('_', ' ').title()} backend requires input and weight width to be {self.kernel_size}. "
+                        f"Got input width={x.shape[-1]}, weight width={weight.shape[-1]}"
+                    )
+                # Check JTC plane sizing
+                required_size = 2 * self.kernel_size + self.config.jtc_separation
+                if self.config.jtc_total_field < required_size:
+                    warnings.warn(
+                        f"JTC total field ({self.config.jtc_total_field}) is smaller than "
+                        f"recommended size ({required_size} = 2*kernel_size + separation). "
+                        f"This may cause aliasing artifacts.",
+                        UserWarning
+                    )
 
     def jtc_emulation_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """Full hardware JTC emulation pipeline with distortions."""
@@ -466,31 +451,30 @@ class FTconvlayer(_ConvNd):
                 patch = x_c[..., 8 * i_p : 8 * i_p + 8]
 
                 # Select backend based on conv_backend parameter
-                backend = self.config.conv_backend
-                if backend is None:
-                    backend = "jtc_emulation"  # Default fallback
+                backend = self.config.conv_backend or "jtc_emulation"
 
                 # Validate sizes for the selected backend
                 self._validate_backend_sizes(patch, weight_c, backend)
 
-                # Route to appropriate backend
-                if backend == "pytorch":
-                    system_out = self.pytorch_conv_forward(patch, weight_c).permute(
-                        0, 2, 3, 1
-                    )
-                elif backend == "fourier":
-                    system_out = self.fourier_conv_forward(patch, weight_c).permute(
-                        0, 2, 3, 1
-                    )
-                elif backend == "jtc_emulation":
-                    system_out = self.jtc_emulation_forward(patch, weight_c).permute(
-                        0, 2, 3, 1
-                    )
-                else:
-                    raise ValueError(
-                        f"Unknown conv_backend: {backend}. "
-                        f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
-                    )
+                # Route to appropriate backend using match/case
+                match backend:
+                    case "pytorch":
+                        system_out = self.pytorch_conv_forward(patch, weight_c).permute(
+                            0, 2, 3, 1
+                        )
+                    case "fourier":
+                        system_out = self.fourier_conv_forward(patch, weight_c).permute(
+                            0, 2, 3, 1
+                        )
+                    case "jtc_emulation":
+                        system_out = self.jtc_emulation_forward(patch, weight_c).permute(
+                            0, 2, 3, 1
+                        )
+                    case _:
+                        raise ValueError(
+                            f"Unknown conv_backend: {backend}. "
+                            f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
+                        )
                 output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
         return output
 

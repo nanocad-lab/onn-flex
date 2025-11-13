@@ -3,6 +3,12 @@ Simple smoke test to validate config changes without requiring PyTorch.
 Tests configuration validation and parameter handling.
 """
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from onn_config import AppConfig
 
 

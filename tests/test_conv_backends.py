@@ -8,6 +8,12 @@ Tests:
 4. Size extensibility - verify different input/weight sizes work as expected
 """
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import pytest
 import warnings
