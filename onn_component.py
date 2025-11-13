@@ -14,7 +14,9 @@ import math
 class QuantDequant_STE(torch.autograd.Function):
     # version of the MRR LUT but implemented with straight-thourgh estimator to help training
     @staticmethod
-    def forward(ctx, input: torch.Tensor, bits: int) -> torch.Tensor:
+    def forward(ctx, input: torch.Tensor, bits: int | None) -> torch.Tensor:
+        if bits is None:
+            return input
         levels = 2**bits
         input_clamped = torch.clamp(input, 0, 1)
         return torch.round(input_clamped * (levels - 1)) / (levels - 1)
@@ -455,12 +457,19 @@ class JTC(nn.Module):
         ]
 
     def input_distortion(self, x: torch.Tensor) -> torch.Tensor:
-        x = QuantDequant_STE.apply(x, self.config.dac_bits)
+        """Apply driver and MRM distortion without quantization.
+
+        Note: Quantization should be applied separately before calling this method.
+        """
         x = self.driver(x)
         x = self.mrm(x)
         return x
 
     def output_distortion(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply loss, PD, TIA, and scaling without quantization.
+
+        Note: Quantization should be applied separately after calling this method.
+        """
         x = x * self.loss
         if self.config.scale_output == "pd":
             x = self.scale_to_range(x, 1e-6, 1e-5)
@@ -468,7 +477,6 @@ class JTC(nn.Module):
         x = self.tia(x)
         if self.config.scale_output == "adc":
             x = x / x.max().clamp_min(1e-12)
-        x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
 
     def fft_and_magnitude(self, x: torch.Tensor) -> torch.Tensor:
@@ -544,9 +552,13 @@ class JTC(nn.Module):
 
         DEPRECATED: This method is kept for backward compatibility.
         Use input_distortion() and build_input_plane() separately instead.
+
+        Note: This wrapper applies DAC quantization to maintain backward compatibility.
         """
-        kernel_distorted = self.input_distortion(kernel)
-        signal_distorted = self.input_distortion(signal)
+        kernel_quantized = QuantDequant_STE.apply(kernel, self.config.dac_bits)
+        signal_quantized = QuantDequant_STE.apply(signal, self.config.dac_bits)
+        kernel_distorted = self.input_distortion(kernel_quantized)
+        signal_distorted = self.input_distortion(signal_quantized)
         return self.build_input_plane(signal_distorted, kernel_distorted)
 
     def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
@@ -564,18 +576,24 @@ class JTC(nn.Module):
 
         DEPRECATED: This method is kept for backward compatibility.
         Use output_distortion(torch.abs(jft)) instead.
+
+        Note: This wrapper applies ADC quantization to maintain backward compatibility.
         """
-        return self.output_distortion(torch.abs(jft))
+        output = self.output_distortion(torch.abs(jft))
+        return QuantDequant_STE.apply(output, self.config.adc_bits)
 
     def inverse_output(self, jps: torch.Tensor) -> torch.Tensor:
         """Propagate back to the detector plane and crop the result.
 
         DEPRECATED: This method is kept for backward compatibility.
         The forward method now implements this logic using unified helper methods.
+
+        Note: This wrapper does NOT apply quantization. Use forward() for full pipeline.
         """
         jps_distorted = self.input_distortion(jps)
         output_plane = self.fft_and_magnitude(jps_distorted)
         output_plane = self.output_distortion(output_plane)
+        output_plane = QuantDequant_STE.apply(output_plane, self.config.adc_bits)
         indices = self.compute_correlation_indices(output_plane.device)
         return output_plane[..., indices]
 
@@ -685,19 +703,19 @@ class JTC(nn.Module):
             jps_scaled = jps_tia
         if "jps_scale" in stages:
             results["jps_scale"] = jps_scaled[0, :].detach()
-        # Quantize (ADC bits)
-        jps_quant = QuantDequant_STE.apply(jps_scaled, self.config.adc_bits)
+
+        # Quantize (Fourier plane bits)
+        jps_quant = QuantDequant_STE.apply(jps_scaled, self.config.fourier_plane_bits)
         if "jps_quant" in stages:
             results["jps_quant"] = jps_quant[0, :].detach()
-        # 4-bit quantization variant
+        # Legacy 4-bit quantization variant (kept for backward compatibility)
         jps_quantdac = QuantDequant_STE.apply(jps_scaled, self.config.dac_bits)
         if "jps_quantdac" in stages:
             results["jps_quantdac"] = jps_quantdac[0, :].detach()
 
         # Input distortion again before inverse FFT (second pass)
-        # DAC quantization
-        jps_dac = QuantDequant_STE.apply(jps_quant, self.config.dac_bits)
-        jps_driver = self.driver(jps_dac)
+        # No additional quantization - just driver and MRM
+        jps_driver = self.driver(jps_quant)
         if "jps_driver" in stages:
             results["jps_driver"] = jps_driver[0, :].detach()
         jps_complex = self.mrm(jps_driver)
@@ -750,13 +768,16 @@ class JTC(nn.Module):
         """Joint Transform Correlator forward pass.
 
         Pipeline:
-        1. Input distortion (signal & kernel)
-        2. FFT
-        3. Output distortion
-        4. Input distortion
-        5. FFT
-        6. Output distortion
-        7. Index selection
+        1. DAC quantization (dac_bits)
+        2. Input distortion (driver + MRM)
+        3. FFT to Fourier plane
+        4. Output distortion (loss + PD + TIA + scale)
+        5. Fourier plane quantization (fourier_plane_bits)
+        6. Input distortion (driver + MRM)
+        7. FFT to detector plane
+        8. Output distortion (loss + PD + TIA + scale)
+        9. ADC quantization (adc_bits)
+        10. Index selection
 
         Args:
             signal: Input signal tensor (B, H, 1, W)
@@ -774,27 +795,37 @@ class JTC(nn.Module):
         signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.jtc_half_size)
         kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.jtc_half_size)
 
-        # Step 1: Input distortion (signal & kernel)
-        signal_distorted = self.input_distortion(signal_reshaped)
-        kernel_distorted = self.input_distortion(kernel_reshaped)
+        # Step 1: DAC quantization
+        signal_quantized = QuantDequant_STE.apply(signal_reshaped, self.config.dac_bits)
+        kernel_quantized = QuantDequant_STE.apply(kernel_reshaped, self.config.dac_bits)
+
+        # Step 2: Input distortion (signal & kernel)
+        signal_distorted = self.input_distortion(signal_quantized)
+        kernel_distorted = self.input_distortion(kernel_quantized)
         input_plane = self.build_input_plane(signal_distorted, kernel_distorted)
 
-        # Step 2: FFT
+        # Step 3: FFT to Fourier plane
         jft = self.fft_and_magnitude(input_plane)
 
-        # Step 3: Output distortion
+        # Step 4: Output distortion
         jps = self.output_distortion(jft)
 
-        # Step 4: Input distortion
+        # Step 5: Fourier plane quantization
+        jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
+
+        # Step 6: Input distortion (no quantization before this)
         jps_distorted = self.input_distortion(jps)
 
-        # Step 5: FFT
+        # Step 7: FFT to detector plane
         output_plane = self.fft_and_magnitude(jps_distorted)
 
-        # Step 6: Output distortion
+        # Step 8: Output distortion
         output_plane = self.output_distortion(output_plane)
 
-        # Step 7: Index selection
+        # Step 9: ADC quantization
+        output_plane = QuantDequant_STE.apply(output_plane, self.config.adc_bits)
+
+        # Step 10: Index selection
         indices = self.compute_correlation_indices(output_plane.device)
         output = output_plane[..., indices]
 

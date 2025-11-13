@@ -208,11 +208,15 @@ class FTconvlayer(_ConvNd):
         )
 
     def _apply_quantizer(
-        self, tensor: torch.Tensor, bits: int, domain: str
+        self, tensor: torch.Tensor, bits: int | None, domain: str
     ) -> torch.Tensor:
         """Apply configured quantizer by name for the given domain.
         domain in {activation, weight, output, fourier} controls signedness.
+        If bits is None, no quantization is applied.
         """
+        if bits is None:
+            return tensor
+
         name = self.quantizer_name
         signed_for_domain = domain in ("weight",)
         is_weight_flag = domain in ("weight",)
