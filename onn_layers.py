@@ -233,7 +233,42 @@ class FTconvlayer(_ConvNd):
         return QAT_STE.apply(tensor, int(bits))
 
     # ---------------- Internal helpers ------------------
-    def hardware_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def _validate_backend_sizes(
+        self, x: torch.Tensor, weight: torch.Tensor, backend: str
+    ) -> None:
+        """Validate tensor sizes for the specified backend.
+
+        Size constraints:
+        - pytorch: No specific size constraints, works with any input/weight size
+        - fourier: Input width and weight width must both be 8 (configurable via kernel_size)
+        - jtc_emulation: Input width and weight width must both be 8, JTC parameters
+                         must satisfy: jtc_total_field >= 2*kernel_size + jtc_separation
+        """
+        import warnings
+
+        match backend:
+            case "pytorch":
+                # PyTorch conv2d is flexible with sizes
+                pass
+            case "fourier" | "jtc_emulation":
+                # Both fourier and jtc_emulation have same size constraints
+                if x.shape[-1] != self.kernel_size or weight.shape[-1] != self.kernel_size:
+                    raise ValueError(
+                        f"{backend.replace('_', ' ').title()} backend requires input and weight width to be {self.kernel_size}. "
+                        f"Got input width={x.shape[-1]}, weight width={weight.shape[-1]}"
+                    )
+                # Check JTC plane sizing
+                required_size = 2 * self.kernel_size + self.config.jtc_separation
+                if self.config.jtc_total_field < required_size:
+                    warnings.warn(
+                        f"JTC total field ({self.config.jtc_total_field}) is smaller than "
+                        f"recommended size ({required_size} = 2*kernel_size + separation). "
+                        f"This may cause aliasing artifacts.",
+                        UserWarning
+                    )
+
+    def jtc_emulation_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Full hardware JTC emulation pipeline with distortions."""
         return self.PIC_CONV(x, weight)
 
     def pytorch_conv_forward(
@@ -414,18 +449,32 @@ class FTconvlayer(_ConvNd):
 
             for i_p in range(n_patch):
                 patch = x_c[..., 8 * i_p : 8 * i_p + 8]
-                if self.config.use_pytorch_conv:
-                    system_out = self.pytorch_conv_forward(patch, weight_c).permute(
-                        0, 2, 3, 1
-                    )
-                elif self.config.use_fourier_conv:
-                    system_out = self.fourier_conv_forward(patch, weight_c).permute(
-                        0, 2, 3, 1
-                    )
-                else:
-                    system_out = self.hardware_forward(patch, weight_c).permute(
-                        0, 2, 3, 1
-                    )
+
+                # Select backend based on conv_backend parameter
+                backend = self.config.conv_backend or "jtc_emulation"
+
+                # Validate sizes for the selected backend
+                self._validate_backend_sizes(patch, weight_c, backend)
+
+                # Route to appropriate backend using match/case
+                match backend:
+                    case "pytorch":
+                        system_out = self.pytorch_conv_forward(patch, weight_c).permute(
+                            0, 2, 3, 1
+                        )
+                    case "fourier":
+                        system_out = self.fourier_conv_forward(patch, weight_c).permute(
+                            0, 2, 3, 1
+                        )
+                    case "jtc_emulation":
+                        system_out = self.jtc_emulation_forward(patch, weight_c).permute(
+                            0, 2, 3, 1
+                        )
+                    case _:
+                        raise ValueError(
+                            f"Unknown conv_backend: {backend}. "
+                            f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
+                        )
                 output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
         return output
 

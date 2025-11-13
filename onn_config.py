@@ -54,10 +54,14 @@ class AppConfig:
     ler_std_dev: float = 0.0
 
     conv_method: str = "patch"  # "patch" or "dot_product" or "tile"
-    use_pytorch_conv: bool = (
-        False  # Use PyTorch conv2d with 'same' padding instead of JTC
-    )
-    use_fourier_conv: bool = False  # Use FFT-based convolution instead of JTC
+
+    # Convolution backend selection
+    # Options: 'pytorch', 'fourier', 'jtc_emulation'
+    # - 'pytorch': Standard PyTorch conv2d
+    # - 'fourier': FFT-based convolution (software JTC)
+    # - 'jtc_emulation': Full hardware JTC emulation pipeline
+    conv_backend: Optional[str] = "jtc_emulation"
+
     fourier_plane_bits: Optional[int] = 6  # Bits for Fourier plane quantization
 
     # Quantizer selection (single QAT block for all steps)
@@ -78,3 +82,12 @@ class AppConfig:
     loss: float = 0.96
     # Whether to normalize activations after each identical block
     normalize_blocks: bool = False
+
+    def __post_init__(self):
+        """Validate configuration parameters."""
+        valid_backends = ['pytorch', 'fourier', 'jtc_emulation']
+        if self.conv_backend is not None and self.conv_backend not in valid_backends:
+            raise ValueError(
+                f"Invalid conv_backend '{self.conv_backend}'. "
+                f"Must be one of {valid_backends}"
+            )
