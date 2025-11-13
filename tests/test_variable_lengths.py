@@ -1,0 +1,302 @@
+"""
+Comprehensive test suite for variable input/kernel/output lengths.
+
+Tests the jtc_cycle_planner-based implementation against PyTorch conv for correctness.
+"""
+
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import torch
+import torch.nn.functional as F
+import pytest
+from onn_config import AppConfig
+from onn_component import JTC
+from onn_layers import FTconvlayer
+
+
+class TestVariableLengths:
+    """Test suite for variable length support."""
+
+    def test_usable_outputs_calculation(self):
+        """Test that usable_outputs matches jtc_cycle_planner results."""
+        # Test case 1: (input=8, kernel=3, lens=32, sep=7) -> output=6
+        assert JTC._compute_usable_outputs(8, 3, 32, 7) == 6
+
+        # Test case 2: (input=16, kernel=8, lens=48, sep=9) -> output=7
+        assert JTC._compute_usable_outputs(16, 8, 48, 9) == 7
+
+        # Test case 3: (input=16, kernel=8, lens=64, sep=15) -> output=9
+        assert JTC._compute_usable_outputs(16, 8, 64, 15) == 9
+
+        # Legacy case: (input=8, kernel=8, lens=48, sep=8) -> output=1
+        assert JTC._compute_usable_outputs(8, 8, 48, 8) == 1
+
+    def test_jtc_initialization_with_auto_output_length(self):
+        """Test that JTC correctly auto-calculates output_length."""
+        config = AppConfig(
+            input_length=8,
+            kernel_length=3,
+            output_length=None,  # Auto-calculate
+            jtc_separation=7,
+            jtc_total_field=32,
+        )
+
+        jtc = JTC(config)
+        assert jtc.input_length == 8
+        assert jtc.kernel_length == 3
+        assert jtc.output_length == 6  # Should be auto-calculated
+
+    def test_jtc_initialization_with_manual_output_length(self):
+        """Test that JTC respects manually specified output_length."""
+        config = AppConfig(
+            input_length=16,
+            kernel_length=8,
+            output_length=7,  # Manually specified
+            jtc_separation=9,
+            jtc_total_field=48,
+        )
+
+        jtc = JTC(config)
+        assert jtc.input_length == 16
+        assert jtc.kernel_length == 8
+        assert jtc.output_length == 7
+
+    def test_jtc_invalid_config_raises_error(self):
+        """Test that invalid configuration raises an error."""
+        config = AppConfig(
+            input_length=32,  # Too large
+            kernel_length=32,  # Too large
+            output_length=None,
+            jtc_separation=8,
+            jtc_total_field=48,  # Not enough space
+        )
+
+        with pytest.raises(ValueError, match="No valid outputs"):
+            JTC(config)
+
+    @pytest.mark.parametrize("input_len,kernel_len,lens,sep,expected_output", [
+        (8, 3, 32, 7, 6),
+        (16, 8, 48, 9, 7),
+        (16, 8, 64, 15, 9),
+        (8, 8, 48, 8, 1),
+    ])
+    def test_jtc_forward_shape(self, input_len, kernel_len, lens, sep, expected_output):
+        """Test that JTC forward pass produces correct output shape."""
+        config = AppConfig(
+            input_length=input_len,
+            kernel_length=kernel_len,
+            output_length=None,
+            jtc_separation=sep,
+            jtc_total_field=lens,
+            dac_bits=None,  # Disable quantization for this test
+            adc_bits=None,
+            fourier_plane_bits=None,
+        )
+
+        jtc = JTC(config)
+
+        # Create test inputs
+        batch_size = 2
+        height = 4
+        num_kernels = 3
+        signal = torch.randn(batch_size, height, 1, input_len)
+        kernel = torch.randn(num_kernels, kernel_len)
+
+        # Forward pass
+        output = jtc(signal, kernel)
+
+        # Check output shape
+        assert output.shape == (batch_size, height, num_kernels, expected_output)
+        assert torch.isfinite(output).all()
+
+    def test_fourier_backend_variable_lengths(self):
+        """Test Fourier backend with variable lengths."""
+        config = AppConfig(
+            input_length=16,
+            kernel_length=8,
+            output_length=None,
+            jtc_separation=9,
+            jtc_total_field=48,
+            conv_backend="fourier",
+            dac_bits=None,
+            adc_bits=None,
+            fourier_plane_bits=None,
+        )
+
+        layer = FTconvlayer(
+            in_channels=1,
+            out_channels=2,
+            config=config,
+            kernel_size=config.input_length,
+            batch_size=2,
+        )
+
+        # Create test input
+        batch_size = 2
+        test_input = torch.randn(batch_size, 1, 32, 32)
+
+        # Forward pass
+        output = layer(test_input)
+
+        # Check output shape
+        assert output.shape[0] == batch_size
+        assert output.shape[1] == 2  # out_channels
+        assert torch.isfinite(output).all()
+
+    def test_jtc_emulation_backend_variable_lengths(self):
+        """Test JTC emulation backend with variable lengths."""
+        config = AppConfig(
+            input_length=8,
+            kernel_length=3,
+            output_length=None,
+            jtc_separation=7,
+            jtc_total_field=32,
+            conv_backend="jtc_emulation",
+            dac_bits=4,
+            adc_bits=6,
+        )
+
+        layer = FTconvlayer(
+            in_channels=1,
+            out_channels=2,
+            config=config,
+            kernel_size=config.input_length,
+            batch_size=2,
+        )
+
+        # Create test input
+        batch_size = 2
+        test_input = torch.randn(batch_size, 1, 32, 32)
+
+        # Forward pass
+        output = layer(test_input)
+
+        # Check output shape
+        assert output.shape[0] == batch_size
+        assert output.shape[1] == 2  # out_channels
+        assert torch.isfinite(output).all()
+
+    def _pytorch_conv_reference(self, signal, kernel):
+        """Compute reference convolution using PyTorch."""
+        # signal: [batch, input_len]
+        # kernel: [kernel_len]
+        # Returns: [batch, output_len] where output_len = input_len - kernel_len + 1
+
+        # Reshape for conv1d: signal needs [batch, channels=1, length]
+        signal_conv = signal.unsqueeze(1)  # [batch, 1, input_len]
+        kernel_conv = kernel.unsqueeze(0).unsqueeze(0)  # [1, 1, kernel_len]
+
+        # Apply 1D convolution with valid padding
+        output = F.conv1d(signal_conv, kernel_conv, padding=0)  # [batch, 1, output_len]
+        return output.squeeze(1)  # [batch, output_len]
+
+    @pytest.mark.parametrize("input_len,kernel_len,lens,sep", [
+        (8, 3, 32, 7),
+        (16, 8, 48, 9),
+        (16, 8, 64, 15),
+    ])
+    def test_fourier_vs_pytorch_conv(self, input_len, kernel_len, lens, sep):
+        """Test that Fourier backend matches PyTorch conv (within tolerance)."""
+        config = AppConfig(
+            input_length=input_len,
+            kernel_length=kernel_len,
+            output_length=None,
+            jtc_separation=sep,
+            jtc_total_field=lens,
+            conv_backend="fourier",
+            dac_bits=None,  # Disable quantization
+            adc_bits=None,
+            fourier_plane_bits=None,
+            scale_output="none",
+        )
+
+        jtc = JTC(config)
+        usable_output_len = jtc.output_length
+
+        # Create test inputs
+        batch_size = 4
+        torch.manual_seed(42)
+        signal = torch.randn(batch_size, input_len) * 0.1
+        kernel = torch.randn(kernel_len) * 0.1
+
+        # Compute reference PyTorch conv
+        pytorch_result = self._pytorch_conv_reference(signal, kernel)
+
+        # Extract the usable portion from PyTorch result
+        # The usable outputs start at an offset determined by jtc_cycle_planner
+        conv_len = input_len + kernel_len - 1
+        delta = sep + 0.5 * (input_len + kernel_len)
+        half_conv = 0.5 * (conv_len - 1)
+        auto_right = max(input_len - 1, kernel_len - 1)
+
+        # Find first valid index in the full convolution output
+        start_j = None
+        for j in range(kernel_len - 1, input_len):
+            x = delta + (j - half_conv)
+            if x <= auto_right:
+                continue
+            start_j = j
+            break
+
+        # Extract usable outputs from PyTorch result
+        if start_j is not None:
+            pytorch_usable = pytorch_result[:, start_j:start_j + usable_output_len]
+        else:
+            pytest.skip("No valid indices found")
+
+        # Compute JTC Fourier result
+        # Reshape signal for JTC: [batch, 1, 1, input_len]
+        signal_jtc = signal.unsqueeze(1).unsqueeze(1)
+        # Reshape kernel for JTC: [1, kernel_len]
+        kernel_jtc = kernel.unsqueeze(0)
+
+        # Use the Fourier backend directly
+        layer = FTconvlayer(
+            in_channels=1,
+            out_channels=1,
+            config=config,
+            kernel_size=input_len,
+            batch_size=batch_size,
+        )
+
+        # Override the weights with our test kernel
+        with torch.no_grad():
+            layer.weights.data = kernel_jtc.unsqueeze(0).unsqueeze(-1)  # Add dims for in_channels and dual
+
+        # Create input in the expected format
+        test_input_patches = signal_jtc  # [batch, 1, 1, input_len]
+
+        # Run fourier_conv_forward directly
+        fourier_result = layer.fourier_conv_forward(
+            test_input_patches,
+            kernel_jtc
+        )  # [batch, 1, 1, output_len]
+
+        fourier_result = fourier_result.squeeze(1).squeeze(1)  # [batch, output_len]
+
+        # Compare results
+        assert fourier_result.shape == pytorch_usable.shape, \
+            f"Shape mismatch: fourier={fourier_result.shape}, pytorch={pytorch_usable.shape}"
+
+        # Check that results are close (allowing for numerical differences)
+        # Normalize by max to make comparison scale-invariant
+        pytorch_norm = pytorch_usable / (pytorch_usable.abs().max() + 1e-12)
+        fourier_norm = fourier_result / (fourier_result.abs().max() + 1e-12)
+
+        torch.testing.assert_close(
+            fourier_norm,
+            pytorch_norm,
+            rtol=1e-4,
+            atol=1e-5,
+            msg=f"Fourier backend does not match PyTorch conv for config "
+                f"(input={input_len}, kernel={kernel_len}, lens={lens}, sep={sep})"
+        )
+
+
+if __name__ == "__main__":
+    # Run tests with pytest
+    pytest.main([__file__, "-v", "--tb=short", "-k", "test_usable_outputs_calculation or test_jtc_initialization"])

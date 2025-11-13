@@ -28,7 +28,9 @@ class TestConvBackends:
     def base_config(self):
         """Create a base configuration for testing."""
         config = AppConfig(
-            jtc_half_size=8,
+            input_length=8,
+            kernel_length=8,
+            output_length=None,
             jtc_separation=8,
             jtc_total_field=48,
             dac_bits=4,
@@ -412,7 +414,9 @@ def test_backend_selection_integration():
     """Integration test for backend selection with full forward pass."""
     config = AppConfig(
         conv_backend="pytorch",
-        jtc_half_size=8,
+        input_length=8,
+        kernel_length=8,
+        output_length=None,
         jtc_separation=8,
         jtc_total_field=48,
     )

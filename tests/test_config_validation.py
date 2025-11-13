@@ -55,7 +55,9 @@ def test_config_defaults():
     print("  ✓ Old flags (use_pytorch_conv, use_fourier_conv) removed")
 
     # Check other important defaults
-    assert config.jtc_half_size == 8
+    assert config.input_length == 8
+    assert config.kernel_length == 8
+    assert config.output_length is None  # Auto-calculated
     assert config.jtc_separation == 0
     assert config.jtc_total_field == 16
     assert config.dac_bits == 4
@@ -71,7 +73,9 @@ def test_config_from_yaml_structure():
 
     config_dict = {
         "conv_backend": "fourier",
-        "jtc_half_size": 8,
+        "input_length": 8,
+        "kernel_length": 8,
+        "output_length": None,
         "jtc_separation": 8,
         "jtc_total_field": 48,
         "dac_bits": 4,
@@ -83,7 +87,9 @@ def test_config_from_yaml_structure():
     config = AppConfig(**config_dict)
 
     assert config.conv_backend == "fourier"
-    assert config.jtc_half_size == 8
+    assert config.input_length == 8
+    assert config.kernel_length == 8
+    assert config.output_length is None
     assert config.jtc_separation == 8
     assert config.jtc_total_field == 48
     print("  ✓ Config created successfully from dict")
@@ -100,7 +106,9 @@ def test_backend_choices():
     for backend in backends:
         config = AppConfig(
             conv_backend=backend,
-            jtc_half_size=8,
+            input_length=8,
+            kernel_length=8,
+            output_length=None,
             jtc_separation=8,
             jtc_total_field=48,
         )

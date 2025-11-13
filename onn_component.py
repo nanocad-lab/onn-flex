@@ -427,10 +427,28 @@ class JTC(nn.Module):
         self.mrm = MRM(config)
         self.pd = PD(config)
         self.tia = TIA(config)
-        self.jtc_half_size = config.jtc_half_size
+        self.input_length = config.input_length
+        self.kernel_length = config.kernel_length
         self.jtc_separation = config.jtc_separation
         self.jtc_total_field = config.jtc_total_field
         self.loss = float(config.loss)
+
+        # Calculate output_length from usable_outputs if not specified
+        if config.output_length is None:
+            self.output_length = self._compute_usable_outputs(
+                self.input_length,
+                self.kernel_length,
+                self.jtc_total_field,
+                self.jtc_separation
+            )
+            if self.output_length <= 0:
+                raise ValueError(
+                    f"No valid outputs for config: input_length={self.input_length}, "
+                    f"kernel_length={self.kernel_length}, lens_size={self.jtc_total_field}, "
+                    f"separation={self.jtc_separation}"
+                )
+        else:
+            self.output_length = config.output_length
 
         # Ordered list of available stage names
         self.stage_order = [
@@ -454,6 +472,103 @@ class JTC(nn.Module):
             "output_quant",
             "output_slice",
         ]
+
+    @staticmethod
+    def _compute_usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
+        """Compute the number of usable output values from JTC.
+
+        This implements the logic from jtc_cycle_planner.py to find the longest
+        contiguous run of valid output indices that avoid autocorrelation artifacts
+        and fit within the lens.
+
+        Args:
+            input_len: Length of input signal
+            kernel_len: Length of kernel/weight
+            lens_size: Size of JTC lens (jtc_total_field)
+            sep: Separation between kernel and signal
+
+        Returns:
+            Number of usable output values
+        """
+        # Validation
+        if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
+            return 0
+        if input_len < kernel_len:
+            return 0
+        if sep < 0:
+            return 0
+        if input_len + kernel_len + sep > lens_size:
+            return 0
+
+        # From jtc_cycle_planner formula
+        delta = sep + 0.5 * (input_len + kernel_len)
+        conv_len = input_len + kernel_len - 1
+        half_conv = 0.5 * (conv_len - 1)
+        auto_right = max(input_len - 1, kernel_len - 1)
+        lens_right = 0.5 * (lens_size - 1)
+        run = best = 0
+        for j in range(kernel_len - 1, input_len):
+            x = delta + (j - half_conv)
+            if x <= auto_right:
+                run = 0
+                continue
+            if x > lens_right:
+                break
+            run += 1
+            if run > best:
+                best = run
+        return best
+
+    def _compute_valid_output_indices(self, device) -> tuple[torch.Tensor, int]:
+        """Compute the valid output indices for extracting correlation output.
+
+        This implements the logic from jtc_cycle_planner.py to find which
+        output indices are valid (avoiding autocorrelation and staying within lens).
+
+        Returns:
+            Tuple of (indices tensor, start_index)
+        """
+        input_len = self.input_length
+        kernel_len = self.kernel_length
+        lens_size = self.jtc_total_field
+        sep = self.jtc_separation
+
+        # From jtc_cycle_planner formula
+        delta = sep + 0.5 * (input_len + kernel_len)
+        conv_len = input_len + kernel_len - 1
+        half_conv = 0.5 * (conv_len - 1)
+        auto_right = max(input_len - 1, kernel_len - 1)
+        lens_right = 0.5 * (lens_size - 1)
+
+        # Find the first valid index and length of valid run
+        start_j = None
+        run_length = 0
+        for j in range(kernel_len - 1, input_len):
+            x = delta + (j - half_conv)
+            if x <= auto_right:
+                continue
+            if x > lens_right:
+                break
+            if start_j is None:
+                start_j = j
+            run_length += 1
+
+        if start_j is None or run_length == 0:
+            raise ValueError(
+                f"No valid output indices for config: input_length={input_len}, "
+                f"kernel_length={kernel_len}, lens_size={lens_size}, separation={sep}"
+            )
+
+        # Compute indices in the shifted FFT output
+        # The correlation peak is at: lens_size//2 + sep + kernel_len//2 + offset
+        base_center = lens_size // 2 + sep + kernel_len // 2
+        indices = torch.arange(
+            base_center + 1 - (conv_len // 2) + start_j,
+            base_center + 1 - (conv_len // 2) + start_j + run_length,
+            device=device
+        ) % lens_size
+
+        return indices, start_j
 
     def input_distortion(self, x: torch.Tensor) -> torch.Tensor:
         """Apply driver and MRM distortion without quantization.
@@ -485,22 +600,12 @@ class JTC(nn.Module):
         return torch.abs(x)
 
     def compute_correlation_indices(self, device) -> torch.Tensor:
-        """Compute the indices for extracting correlation output."""
-        return (
-            torch.arange(
-                self.jtc_total_field // 2
-                + self.jtc_separation
-                + self.jtc_half_size // 2
-                + 1,
-                self.jtc_total_field // 2
-                + self.jtc_separation
-                + self.jtc_half_size // 2
-                + 1
-                + self.jtc_half_size,
-                device=device,
-            )
-            % self.jtc_total_field
-        )
+        """Compute the indices for extracting correlation output.
+
+        Uses the jtc_cycle_planner logic to find valid output indices.
+        """
+        indices, _ = self._compute_valid_output_indices(device)
+        return indices
 
     def build_input_plane(
         self, signal: torch.Tensor, kernel: torch.Tensor
@@ -519,12 +624,12 @@ class JTC(nn.Module):
         N = kernel.shape[-1]
 
         # Validation
-        if M > self.jtc_half_size:
-            raise ValueError("Signal length is greater than JTC half size")
-        if N > self.jtc_half_size:
-            raise ValueError("Kernel length is greater than JTC half size")
+        if M > self.input_length:
+            raise ValueError(f"Signal length ({M}) is greater than configured input_length ({self.input_length})")
+        if N > self.kernel_length:
+            raise ValueError(f"Kernel length ({N}) is greater than configured kernel_length ({self.kernel_length})")
         if M + N + self.jtc_separation > self.jtc_total_field:
-            raise ValueError("Not enough JTC field")
+            raise ValueError(f"Not enough JTC field: {M} + {N} + {self.jtc_separation} > {self.jtc_total_field}")
 
         # Calculate positions
         kernel_start = 0
@@ -624,12 +729,12 @@ class JTC(nn.Module):
         B = signal.shape[0]
         M = signal.shape[-1]
         N = kernel.shape[-1]
-        if M > self.jtc_half_size:
-            raise ValueError("Signal length is greater than JTC half size")
-        if N > self.jtc_half_size:
-            raise ValueError("Kernel length is greater than JTC half size")
+        if M > self.input_length:
+            raise ValueError(f"Signal length ({M}) is greater than configured input_length ({self.input_length})")
+        if N > self.kernel_length:
+            raise ValueError(f"Kernel length ({N}) is greater than configured kernel_length ({self.kernel_length})")
         if M + N + self.jtc_separation > self.jtc_total_field:
-            raise ValueError("Not enough JTC field")
+            raise ValueError(f"Not enough JTC field: {M} + {N} + {self.jtc_separation} > {self.jtc_total_field}")
 
         # Indices for placement
         kernel_start = 0
@@ -787,8 +892,8 @@ class JTC(nn.Module):
         batch_size_for_jtc = (
             signal_full.shape[0] * signal_full.shape[1] * signal_full.shape[2]
         )
-        signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.jtc_half_size)
-        kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.jtc_half_size)
+        signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.input_length)
+        kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.kernel_length)
 
         # Step 1: DAC quantization
         signal_quantized = QuantDequant_STE.apply(signal_reshaped, self.config.dac_bits)
@@ -829,6 +934,6 @@ class JTC(nn.Module):
             signal_full.shape[0],
             signal_full.shape[1],
             signal_full.shape[2],
-            self.jtc_half_size,
+            self.output_length,
         )
         return output_reshaped
