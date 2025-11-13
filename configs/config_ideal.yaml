@@ -25,6 +25,7 @@ tia_distortion_data_path: ./component_data/tia_sim_data.csv
 tia_distortion_polyfit_order: null
 tia_distortion_strength: 0.0
 ler_std_dev: 0.0
+conv_backend: jtc_emulation
 num_identical_layers: 1
 num_epochs: 20
 learning_rate: 0.001
