@@ -6,7 +6,6 @@ to the original implementation via backward compatibility wrappers.
 """
 
 import torch
-import numpy as np
 from onn_config import AppConfig
 from onn_component import JTC
 
@@ -95,15 +94,15 @@ def test_helper_methods():
     expected = torch.abs(torch.fft.fftshift(torch.fft.fft(x)))
     diff = torch.max(torch.abs(result - expected)).item()
     print(f"  Max difference from manual FFT: {diff:.2e}")
-    print(f"  ✓ PASS" if diff < 1e-6 else f"  ✗ FAIL")
+    print(f"{'✓ PASS' if diff < 1e-6 else '✗ FAIL'}")
 
     # Test compute_correlation_indices
     print("\n[2.2] Testing compute_correlation_indices()...")
-    indices = jtc.compute_correlation_indices(torch.device('cpu'))
+    indices = jtc.compute_correlation_indices(torch.device("cpu"))
     print(f"  Indices shape: {indices.shape}")
     print(f"  Indices range: [{indices.min()}, {indices.max()}]")
     print(f"  Expected length: {jtc.jtc_half_size}")
-    print(f"  ✓ PASS" if len(indices) == jtc.jtc_half_size else f"  ✗ FAIL")
+    print(f"  {'✓ PASS' if len(indices) == jtc.jtc_half_size else '✗ FAIL'}")
 
     # Test build_input_plane
     print("\n[2.3] Testing build_input_plane()...")
@@ -115,7 +114,7 @@ def test_helper_methods():
     non_zero = (plane != 0).sum().item()
     print(f"  Non-zero elements: {non_zero}")
     print(f"  Expected: {8 + 8} (signal + kernel)")
-    print(f"  ✓ PASS" if plane.shape[1] == jtc.jtc_total_field else f"  ✗ FAIL")
+    print(f"{'✓ PASS' if plane.shape[1] == jtc.jtc_total_field else '✗ FAIL'}")
 
     return True
 
@@ -150,8 +149,12 @@ def test_pipeline_steps():
         print("\nStep 1: Input distortion")
         signal_distorted = jtc.input_distortion(signal_reshaped)
         kernel_distorted = jtc.input_distortion(kernel_reshaped)
-        print(f"  Signal distorted: {signal_distorted.shape}, dtype={signal_distorted.dtype}")
-        print(f"  Kernel distorted: {kernel_distorted.shape}, dtype={kernel_distorted.dtype}")
+        print(
+            f"  Signal distorted: {signal_distorted.shape}, dtype={signal_distorted.dtype}"
+        )
+        print(
+            f"  Kernel distorted: {kernel_distorted.shape}, dtype={kernel_distorted.dtype}"
+        )
 
         # Step 2: Build input plane
         print("\nStep 2: Build input plane")
@@ -256,14 +259,18 @@ def test_gradients():
     signal_grad = signal.grad
     kernel_grad = kernel.grad
 
-    print(f"\nGradient statistics:")
+    print("\nGradient statistics:")
     print(f"  Signal grad: shape={signal_grad.shape}")
-    print(f"    - Non-zero elements: {(signal_grad != 0).sum().item()}/{signal_grad.numel()}")
+    print(
+        f"    - Non-zero elements: {(signal_grad != 0).sum().item()}/{signal_grad.numel()}"
+    )
     print(f"    - Mean abs: {signal_grad.abs().mean().item():.2e}")
     print(f"    - Max abs: {signal_grad.abs().max().item():.2e}")
 
     print(f"  Kernel grad: shape={kernel_grad.shape}")
-    print(f"    - Non-zero elements: {(kernel_grad != 0).sum().item()}/{kernel_grad.numel()}")
+    print(
+        f"    - Non-zero elements: {(kernel_grad != 0).sum().item()}/{kernel_grad.numel()}"
+    )
     print(f"    - Mean abs: {kernel_grad.abs().mean().item():.2e}")
     print(f"    - Max abs: {kernel_grad.abs().max().item():.2e}")
 
@@ -291,6 +298,7 @@ def main():
     except Exception as e:
         print(f"✗ Test failed with exception: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("Backward Compatibility", False))
 
@@ -299,6 +307,7 @@ def main():
     except Exception as e:
         print(f"✗ Test failed with exception: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("Helper Methods", False))
 
@@ -307,6 +316,7 @@ def main():
     except Exception as e:
         print(f"✗ Test failed with exception: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("Pipeline Steps", False))
 
@@ -315,6 +325,7 @@ def main():
     except Exception as e:
         print(f"✗ Test failed with exception: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("Determinism", False))
 
@@ -323,6 +334,7 @@ def main():
     except Exception as e:
         print(f"✗ Test failed with exception: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("Gradient Flow", False))
 
@@ -348,4 +360,5 @@ def main():
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())
