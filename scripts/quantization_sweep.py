@@ -263,7 +263,18 @@ def main() -> None:
 
             # Train model
             try:
-                train_result = train_onn_model(config)
+                final_accuracy = train_onn_model(config)
+
+                # Load checkpoint to get best accuracy
+                checkpoint_path = output_dir / "fftconv_checkpoint.pth"
+                best_accuracy = final_accuracy  # Default to final if checkpoint load fails
+                if checkpoint_path.exists():
+                    try:
+                        import torch
+                        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                        best_accuracy = checkpoint.get("best_accuracy", final_accuracy)
+                    except Exception as e:
+                        print(f"Warning: Could not load checkpoint to get best accuracy: {e}")
 
                 # Record results
                 result = {
@@ -273,12 +284,16 @@ def main() -> None:
                     "adc_bits": adc_bits,
                     "fourier_plane_bits": fourier_plane_bits,
                     "output_dir": str(output_dir),
+                    "final_accuracy": float(final_accuracy),
+                    "best_accuracy": float(best_accuracy),
                     "status": "success",
                 }
                 results.append(result)
 
                 print("\n" + "-" * 80)
                 print(f"✓ Completed run {current_run}/{total_runs}: {run_id}")
+                print(f"  Final accuracy: {final_accuracy:.2f}%")
+                print(f"  Best accuracy:  {best_accuracy:.2f}%")
                 print("-" * 80 + "\n")
 
             except Exception as e:
@@ -307,7 +322,34 @@ def main() -> None:
     print(f"Successful: {sum(1 for r in results if r['status'] == 'success')}")
     print(f"Failed: {sum(1 for r in results if r['status'] == 'failed')}")
     print(f"Summary saved to: {summary_file}")
-    print("=" * 80 + "\n")
+    print("=" * 80)
+
+    # Print results table
+    successful_results = [r for r in results if r["status"] == "success"]
+    if successful_results:
+        print("\nRESULTS SUMMARY:")
+        print("-" * 80)
+        print(f"{'Backend':<15} {'DAC':<6} {'ADC':<6} {'Fourier':<8} {'Final %':<10} {'Best %':<10}")
+        print("-" * 80)
+        for r in successful_results:
+            backend = r["backend"]
+            dac = format_bits(r["dac_bits"])
+            adc = format_bits(r["adc_bits"])
+            fourier = format_bits(r["fourier_plane_bits"])
+            final = f"{r['final_accuracy']:.2f}"
+            best = f"{r['best_accuracy']:.2f}"
+            print(f"{backend:<15} {dac:<6} {adc:<6} {fourier:<8} {final:<10} {best:<10}")
+        print("-" * 80)
+
+        # Print best performing configurations
+        print("\nTOP 5 CONFIGURATIONS (by best accuracy):")
+        print("-" * 80)
+        sorted_results = sorted(successful_results, key=lambda x: x["best_accuracy"], reverse=True)
+        for i, r in enumerate(sorted_results[:5], 1):
+            print(f"{i}. {r['run_id']}: {r['best_accuracy']:.2f}%")
+        print("-" * 80)
+
+    print("\n")
 
 
 if __name__ == "__main__":
