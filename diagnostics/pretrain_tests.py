@@ -208,7 +208,7 @@ def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
 
     Uses `JTC.compute_stage_tensors` to retrieve the following stages (when available):
     input_plane, input_plane_quant, input_plane_driver, input_plane_mrm_phase,
-    input_plane_mrm_pwr, jps_raw, jps_pd, jps_tia, jps_scale, jps_quant, jps_quantdac,
+    input_plane_mrm_pwr, jps_raw, jps_pd, jps_tia, jps_scale, jps_quant,
     jps_driver, jps_mrm_phase, jps_mrm_pwr, output_raw, output_pd, output_tia, output_scale,
     output_quant, output_slice.
     """
