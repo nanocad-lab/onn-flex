@@ -270,12 +270,6 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Use FFT-based convolution instead of JTC",
     )
     parser.add_argument(
-        "--quantize-fourier-plane",
-        action="store_true",
-        default=yaml_config.quantize_fourier_plane,
-        help="Apply quantization to Fourier plane (real/imag parts)",
-    )
-    parser.add_argument(
         "--fourier-plane-bits",
         type=int,
         default=yaml_config.fourier_plane_bits,
