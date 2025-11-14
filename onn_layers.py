@@ -146,7 +146,7 @@ class _ConvNd(Module):
         self.groups = groups
         self.padding_mode = padding_mode
         self.weights = Parameter(
-            torch.Tensor(in_channels, out_channels // groups, kernel_size, 2)
+            torch.Tensor(in_channels, out_channels // groups, config.kernel_length, 2)
         )
         self.cout_per_cin = out_channels // groups
         if bias:
@@ -380,7 +380,7 @@ class FTconvlayer(_ConvNd):
         plane_size = int(self.config.jtc_total_field)
         sep = int(self.config.jtc_separation)
 
-        # Build input planes: place kernel [0:M], signal [M+sep : M+sep+N]
+        # Build input planes: place kernel [0:N], signal [N+sep:N+sep+M]
         input_plane = torch.zeros(
             batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
         )
@@ -388,9 +388,9 @@ class FTconvlayer(_ConvNd):
         signal_complex = signal_reshaped.to(torch.complex64)
 
         kernel_start = 0
-        kernel_end = kernel_start + M
+        kernel_end = kernel_start + N  # N is kernel_length
         signal_start = kernel_end + sep
-        signal_end = signal_start + N
+        signal_end = signal_start + M  # M is input_length
 
         input_plane[:, kernel_start:kernel_end] = kernel_complex
         input_plane[:, signal_start:signal_end] = signal_complex
