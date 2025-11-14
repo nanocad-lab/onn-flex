@@ -420,6 +420,51 @@ class LER_variation(nn.Module):
 
 
 class JTC(nn.Module):
+    @staticmethod
+    def _compute_usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
+        """Compute the number of usable outputs for given JTC parameters.
+
+        This implements the formula from jtc_cycle_planner.py.
+
+        Args:
+            input_len: Length of input signal (M)
+            kernel_len: Length of kernel (N)
+            lens_size: Total size of JTC plane
+            sep: Separation between kernel and signal
+
+        Returns:
+            Number of usable correlation outputs
+        """
+        # Validation checks
+        if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
+            return 0
+        if input_len < kernel_len:
+            return 0
+        if sep < 0:
+            return 0
+        if input_len + kernel_len + sep > lens_size:
+            return 0
+
+        # Formula from jtc_cycle_planner.py
+        delta = sep + 0.5 * (input_len + kernel_len)
+        conv_len = input_len + kernel_len - 1
+        half_conv = 0.5 * (conv_len - 1)
+        auto_right = max(input_len - 1, kernel_len - 1)
+        lens_right = 0.5 * (lens_size - 1)
+
+        run = best = 0
+        for j in range(kernel_len - 1, input_len):
+            x = delta + (j - half_conv)
+            if x <= auto_right:
+                run = 0
+                continue
+            if x > lens_right:
+                break
+            run += 1
+            if run > best:
+                best = run
+        return best
+
     def __init__(self, config: AppConfig):
         super(JTC, self).__init__()
         self.config = config
@@ -433,7 +478,7 @@ class JTC(nn.Module):
         self.jtc_total_field = config.jtc_total_field
         self.loss = float(config.loss)
 
-        # Calculate output_length from usable_outputs if not specified
+        # Calculate output_length if not specified
         if config.output_length is None:
             self.output_length = self._compute_usable_outputs(
                 self.input_length,
@@ -443,12 +488,20 @@ class JTC(nn.Module):
             )
             if self.output_length <= 0:
                 raise ValueError(
-                    f"No valid outputs for config: input_length={self.input_length}, "
-                    f"kernel_length={self.kernel_length}, lens_size={self.jtc_total_field}, "
-                    f"separation={self.jtc_separation}"
+                    f"No valid outputs for the given configuration: "
+                    f"input_length={self.input_length}, kernel_length={self.kernel_length}, "
+                    f"jtc_total_field={self.jtc_total_field}, jtc_separation={self.jtc_separation}"
                 )
         else:
             self.output_length = config.output_length
+
+        # Validate that configuration is feasible
+        if self.input_length + self.kernel_length + self.jtc_separation > self.jtc_total_field:
+            raise ValueError(
+                f"JTC total field ({self.jtc_total_field}) is too small for "
+                f"input_length ({self.input_length}) + kernel_length ({self.kernel_length}) + "
+                f"separation ({self.jtc_separation}) = {self.input_length + self.kernel_length + self.jtc_separation}"
+            )
 
         # Ordered list of available stage names
         self.stage_order = [
@@ -600,11 +653,22 @@ class JTC(nn.Module):
         return torch.abs(x)
 
     def compute_correlation_indices(self, device) -> torch.Tensor:
-        """Compute the indices for extracting correlation output.
+        """Compute the indices for extracting convolution output.
 
-        Uses the jtc_cycle_planner logic to find valid output indices.
+        Uses golden code formula: same_start = plane_size//2 + sep + N//2 + 1
+        Extracts output_length indices starting from same_start.
         """
-        indices, _ = self._compute_valid_output_indices(device)
+        plane_size = self.jtc_total_field
+        sep = self.jtc_separation
+        N = self.kernel_length
+
+        # Golden code formula for "same" convolution output indices
+        same_start = plane_size // 2 + sep + N // 2 + 1
+        indices = torch.arange(
+            same_start,
+            same_start + self.output_length,
+            device=device
+        ) % plane_size
         return indices
 
     def build_input_plane(

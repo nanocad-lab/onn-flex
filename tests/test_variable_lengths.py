@@ -231,16 +231,22 @@ class TestVariableLengths:
         signal = torch.randn(batch_size, input_len) * 0.1
         kernel = torch.randn(kernel_len) * 0.1
 
-        # Compute reference PyTorch correlation (JTC does correlation, not convolution)
-        pytorch_corr = self._pytorch_correlation_reference(signal, kernel)
+        # Compute reference PyTorch convolution
+        # Since we flip the kernel in JTC, it now computes convolution (not correlation)
+        # Convolution is PyTorch's F.conv1d with full padding
+        signal_conv = signal.unsqueeze(1)  # [batch, 1, input_len]
+        kernel_conv = kernel.unsqueeze(0).unsqueeze(0)  # [1, 1, kernel_len]
+        padding = kernel_len - 1
+        pytorch_conv = F.conv1d(signal_conv, kernel_conv, padding=padding)  # [batch, 1, input_len+kernel_len-1]
+        pytorch_corr = pytorch_conv.squeeze(1)  # [batch, input_len+kernel_len-1]
 
-        # Find which indices in the full correlation are usable (from jtc_cycle_planner)
+        # Find which indices in the full convolution are usable (from jtc_cycle_planner)
         conv_len = input_len + kernel_len - 1
         delta = sep + 0.5 * (input_len + kernel_len)
         half_conv = 0.5 * (conv_len - 1)
         auto_right = max(input_len - 1, kernel_len - 1)
 
-        # Find first valid index in the full correlation output
+        # Find first valid index in the full convolution output
         start_j = None
         for j in range(kernel_len - 1, input_len):
             x = delta + (j - half_conv)
@@ -249,7 +255,7 @@ class TestVariableLengths:
             start_j = j
             break
 
-        # Extract usable outputs from PyTorch correlation
+        # Extract usable outputs from PyTorch convolution
         if start_j is not None:
             pytorch_usable = pytorch_corr[:, start_j:start_j + usable_output_len]
         else:

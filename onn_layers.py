@@ -387,10 +387,13 @@ class FTconvlayer(_ConvNd):
         sep = int(self.config.jtc_separation)
 
         # Build input planes: place kernel [0:N], signal [N+sep:N+sep+M]
+        # IMPORTANT: Flip kernel for convolution (JTC computes correlation by default)
         input_plane = torch.zeros(
             batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
         )
-        kernel_complex = kernel_reshaped.to(torch.complex64)
+        # Flip kernel to convert correlation to convolution
+        kernel_flipped = torch.flip(kernel_reshaped, [-1])
+        kernel_complex = kernel_flipped.to(torch.complex64)
         signal_complex = signal_reshaped.to(torch.complex64)
 
         kernel_start = 0
@@ -405,10 +408,10 @@ class FTconvlayer(_ConvNd):
         roll_amount = (plane_size // 2) - (M + signal_start) // 2
         input_plane = torch.roll(input_plane, shifts=roll_amount, dims=-1)
 
-        # JFT -> JPS
+        # JFT -> JPS (Joint Power Spectrum)
+        # No shift needed - work directly in FFT order
         jft = torch.fft.fft(input_plane, dim=-1)
-        jft_shifted = torch.fft.fftshift(jft, dim=-1)
-        jps_batch = torch.abs(jft_shifted) ** 2
+        jps_batch = torch.abs(jft) ** 2
         jps_batch = jps_batch / plane_size
 
         # Quantize at JPS if enabled (Fourier-plane quantization point)
@@ -418,59 +421,53 @@ class FTconvlayer(_ConvNd):
             )
 
         # Back to output plane and take magnitude
-        output_plane_fft = torch.fft.fft(jps_batch, dim=-1)
-        output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
-        output_plane_abs = torch.abs(output_plane_shifted)
+        # Use IFFT to convert from frequency domain back to spatial domain
+        output_plane_ifft = torch.fft.ifft(jps_batch, dim=-1)
+        output_plane_abs = torch.abs(output_plane_ifft)
 
-        # Extract valid output indices using jtc_cycle_planner logic
-        # Use JTC's method to compute valid indices
-        from onn_component import JTC
-        output_length = JTC._compute_usable_outputs(M, N, plane_size, sep)
-        if output_length <= 0:
-            raise ValueError(
-                f"No valid outputs for config: input_length={M}, "
-                f"kernel_length={N}, lens_size={plane_size}, separation={sep}"
-            )
-
-        # Compute valid indices
+        # Extract convolution output indices
+        # Use the output_length from config (auto-calculated or manually set)
+        # Formula from jtc_cycle_planner for finding valid output indices
         delta = sep + 0.5 * (M + N)
         conv_len = M + N - 1
         half_conv = 0.5 * (conv_len - 1)
         auto_right = max(M - 1, N - 1)
-        lens_right = 0.5 * (plane_size - 1)
 
-        # Find the first valid index and length of valid run
+        # Find the first valid index in the correlation output
         start_j = None
-        run_length = 0
         for j in range(N - 1, M):
-            xpos = delta + (j - half_conv)
-            if xpos <= auto_right:
+            x_pos = delta + (j - half_conv)
+            if x_pos <= auto_right:
                 continue
-            if xpos > lens_right:
-                break
-            if start_j is None:
-                start_j = j
-            run_length += 1
+            start_j = j
+            break
 
-        if start_j is None or run_length == 0:
+        if start_j is None:
             raise ValueError(
-                f"No valid output indices for config: input_length={M}, "
-                f"kernel_length={N}, lens_size={plane_size}, separation={sep}"
+                f"No valid output indices found for input_length={M}, kernel_length={N}, "
+                f"plane_size={plane_size}, sep={sep}"
             )
 
-        # Compute indices in the shifted FFT output
-        base_center = plane_size // 2 + sep + N // 2
-        same_indices = (
-            torch.arange(
-                base_center + 1 - (conv_len // 2) + start_j,
-                base_center + 1 - (conv_len // 2) + start_j + run_length,
-                device=x.device
-            ) % plane_size
-        )
-        correlation_output_batched = output_plane_abs[:, same_indices]
+        # Extract the usable outputs based on config.output_length
+        # If output_length is set in config, use it; otherwise calculate it
+        if self.config.output_length is not None:
+            output_length = self.config.output_length
+        else:
+            # Calculate using _compute_usable_outputs
+            from onn_component import JTC
+            output_length = JTC._compute_usable_outputs(M, N, plane_size, sep)
+
+        # Extract indices from the correlation output, wrapping around plane_size
+        output_indices = torch.arange(
+            start_j,
+            start_j + output_length,
+            device=x.device
+        ) % plane_size
+
+        convolution_output_batched = output_plane_abs[:, output_indices]
 
         # Reshape back to B H Cout output_length
-        out = correlation_output_batched.reshape(B, H, C, output_length)
+        out = convolution_output_batched.reshape(B, H, C, output_length)
 
         # Optional output scaling then ADC quantization
         max_val = out.max()
