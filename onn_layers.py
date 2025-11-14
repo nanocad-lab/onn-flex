@@ -128,6 +128,7 @@ class _ConvNd(Module):
         groups: int,
         bias: bool,
         padding_mode: str,
+        kernel_length: int = None,  # Added for variable length support
     ):
         super().__init__()
         if in_channels % groups != 0:
@@ -145,8 +146,10 @@ class _ConvNd(Module):
         self.output_padding = output_padding
         self.groups = groups
         self.padding_mode = padding_mode
+        # Use kernel_length if provided, otherwise fall back to kernel_size
+        weight_dim = kernel_length if kernel_length is not None else kernel_size
         self.weights = Parameter(
-            torch.Tensor(in_channels, out_channels // groups, config.kernel_length, 2)
+            torch.Tensor(in_channels, out_channels // groups, weight_dim, 2)
         )
         self.cout_per_cin = out_channels // groups
         if bias:
@@ -184,6 +187,9 @@ class FTconvlayer(_ConvNd):
         vertical: bool = False,
         hv_concat: bool = False,
     ):
+        # Store config first so we can access it
+        self.config = config
+
         super().__init__(
             in_channels,
             out_channels,
@@ -197,10 +203,10 @@ class FTconvlayer(_ConvNd):
             groups,
             bias,
             padding_mode,
+            kernel_length=config.kernel_length,  # Pass kernel_length from config
         )
         self.vertical = vertical
         self.hv_concat = hv_concat
-        self.config = config
         self.PIC_CONV = JTC(config)
         # Persist only the quantizer name (avoid lambdas for pickle safety)
         self.quantizer_name = (
