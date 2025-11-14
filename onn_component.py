@@ -505,57 +505,6 @@ class JTC(nn.Module):
             "output_slice",
         ]
 
-    def _compute_valid_output_indices(self, device) -> tuple[torch.Tensor, int]:
-        """Compute the valid output indices for extracting correlation output.
-
-        This implements the logic from jtc_cycle_planner.py to find which
-        output indices are valid (avoiding autocorrelation and staying within lens).
-
-        Returns:
-            Tuple of (indices tensor, start_index)
-        """
-        input_len = self.input_length
-        kernel_len = self.kernel_length
-        lens_size = self.jtc_total_field
-        sep = self.jtc_separation
-
-        # From jtc_cycle_planner formula
-        delta = sep + 0.5 * (input_len + kernel_len)
-        conv_len = input_len + kernel_len - 1
-        half_conv = 0.5 * (conv_len - 1)
-        auto_right = max(input_len - 1, kernel_len - 1)
-        lens_right = 0.5 * (lens_size - 1)
-
-        # Find the first valid index and length of valid run
-        start_j = None
-        run_length = 0
-        for j in range(kernel_len - 1, input_len):
-            x = delta + (j - half_conv)
-            if x <= auto_right:
-                continue
-            if x > lens_right:
-                break
-            if start_j is None:
-                start_j = j
-            run_length += 1
-
-        if start_j is None or run_length == 0:
-            raise ValueError(
-                f"No valid output indices for config: input_length={input_len}, "
-                f"kernel_length={kernel_len}, lens_size={lens_size}, separation={sep}"
-            )
-
-        # Compute indices in the shifted FFT output
-        # The correlation peak is at: lens_size//2 + sep + kernel_len//2 + offset
-        base_center = lens_size // 2 + sep + kernel_len // 2
-        indices = torch.arange(
-            base_center + 1 - (conv_len // 2) + start_j,
-            base_center + 1 - (conv_len // 2) + start_j + run_length,
-            device=device
-        ) % lens_size
-
-        return indices, start_j
-
     def input_distortion(self, x: torch.Tensor) -> torch.Tensor:
         """Apply driver and MRM distortion without quantization.
 
@@ -588,15 +537,16 @@ class JTC(nn.Module):
     def compute_correlation_indices(self, device) -> torch.Tensor:
         """Compute the indices for extracting convolution output.
 
-        Uses golden code formula: same_start = plane_size//2 + sep + N//2 + 1
+        Uses extraction formula: same_start = plane_size//2 + sep + N//2
         Extracts output_length indices starting from same_start.
+        Note: Original formula had +1, removed based on empirical analysis.
         """
         plane_size = self.jtc_total_field
         sep = self.jtc_separation
         N = self.kernel_length
 
-        # Golden code formula for "same" convolution output indices
-        same_start = plane_size // 2 + sep + N // 2 + 1
+        # Extraction formula for correlation output indices
+        same_start = plane_size // 2 + sep + N // 2
         indices = torch.arange(
             same_start,
             same_start + self.output_length,

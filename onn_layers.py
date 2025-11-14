@@ -427,9 +427,10 @@ class FTconvlayer(_ConvNd):
         output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
         output_plane_abs = torch.abs(output_plane_shifted)
 
-        # Extract correlation output using golden code formula
-        # Formula: same_start = plane_size//2 + sep + N//2 + 1
-        same_start = plane_size // 2 + sep + N // 2 + 1
+        # Extract correlation output
+        # Formula: same_start = plane_size//2 + sep + N//2
+        # Note: Original formula had +1, but empirical analysis shows it should be removed
+        same_start = plane_size // 2 + sep + N // 2
 
         # Extract full correlation (M+N-1 outputs) if config allows
         # For properly sized planes with adequate separation, full correlation is overlap-free
