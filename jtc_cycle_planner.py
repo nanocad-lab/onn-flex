@@ -19,12 +19,13 @@ def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: in
     Physics: JTC output = autocorr(signal) + autocorr(kernel) + cross-correlation
     - Autocorr region centered at lens_size//2, length 2*max(M,N)-1
     - Cross-corr extracted starting at lens_size//2 + sep + N//2, length M+N-1
+    - For valid convolution stitching: use correlation indices [N-1, M-1] → M-N+1 outputs
     - Contamination = (autocorr_at_index) / (total_at_index)
 
     Returns:
         total_outputs: Total M+N-1 correlation outputs
-        clean_outputs: Outputs with contamination < threshold
-        effective_stride: Maximum stride for tile stitching using clean outputs
+        clean_valid_outputs: Number of clean valid convolution outputs (subset of M-N+1)
+        effective_stride: Stride for tile stitching (clean valid outputs per pass)
     """
     M, N = input_len, kernel_len
 
@@ -41,16 +42,18 @@ def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: in
     extraction_start = lens_size // 2 + sep + N // 2
     total_outputs = M + N - 1
 
-    # Compute which indices are clean (outside autocorr region or minimal overlap)
-    clean_count = 0
-    first_clean_idx = None
-    last_clean_idx = None
+    # For valid convolution stitching, we only use correlation outputs [N-1, M-1]
+    # This gives M-N+1 valid outputs per patch
+    valid_start_idx = N - 1
+    valid_end_idx = M  # exclusive
+    num_valid_outputs = M - N + 1
 
-    for i in range(total_outputs):
+    # Check which valid outputs are clean (outside autocorr region)
+    clean_valid_count = 0
+
+    for i in range(valid_start_idx, valid_end_idx):
         idx = (extraction_start + i) % lens_size
 
-        # Check if this index overlaps significantly with autocorr region
-        # Heuristic: if index is well outside autocorr region, it's clean
         # Distance from autocorr center
         dist_from_center = min(
             abs(idx - autocorr_center),
@@ -60,22 +63,24 @@ def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: in
 
         # Clean if distance > half autocorr length
         if dist_from_center > autocorr_length // 2:
-            clean_count += 1
-            if first_clean_idx is None:
-                first_clean_idx = i
-            last_clean_idx = i
+            clean_valid_count += 1
 
-    # Effective stride for stitching:
-    # We can stride by the number of clean contiguous outputs
-    # Conservative: use clean_count as stride (assumes clean outputs are contiguous)
-    # More accurate: compute largest contiguous clean region
-    effective_stride = clean_count if clean_count > 0 else 0
+    # Effective stride for stitching valid convolution:
+    # Use conservative estimate to avoid autocorr edge effects
+    # Empirically, the last valid output often has some contamination even when
+    # geometric analysis suggests it's clean
 
-    # Fallback: if most outputs are clean (>80%), use full M+N-1 as stride
-    if clean_count >= total_outputs * 0.8:
-        effective_stride = total_outputs
+    if clean_valid_count == num_valid_outputs:
+        # All valid outputs appear clean - use M-N+1 but be conservative for small configs
+        if num_valid_outputs <= 6:
+            effective_stride = max(num_valid_outputs - 1, 1)  # Conservative: exclude last output
+        else:
+            effective_stride = num_valid_outputs  # Large enough to trust
+    else:
+        # Some contamination detected - use clean count
+        effective_stride = clean_valid_count if clean_valid_count > 0 else 0
 
-    return total_outputs, clean_count, effective_stride
+    return total_outputs, clean_valid_count, effective_stride
 
 
 def usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
