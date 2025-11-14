@@ -386,80 +386,63 @@ class FTconvlayer(_ConvNd):
         plane_size = int(self.config.jtc_total_field)
         sep = int(self.config.jtc_separation)
 
-        # Standard FFT-based convolution: convolve signal with kernel
-        # For linear convolution via FFT, need to pad to at least M+N-1 to avoid circular wrap
-        # We'll use plane_size which should be >= M+N-1
-        signal_padded = torch.zeros(
+        # JTC (Joint Transform Correlator) simulation - emulating real optical physics
+        # JTC computes correlation via Joint Power Spectrum, outputs are magnitudes (always positive)
+
+        # Build input plane: place kernel [0:N], signal [N+sep:N+sep+M]
+        input_plane = torch.zeros(
             batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
         )
-        kernel_padded = torch.zeros(
-            batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
-        )
 
-        # Place signal at start
-        signal_padded[:, :M] = signal_reshaped.to(torch.complex64)
-        # Flip kernel before placing (FFT gives convolution, PyTorch conv1d is correlation)
-        # So we flip to convert: FFT-convolution(signal, flip(kernel)) = correlation(signal, kernel)
-        kernel_flipped = torch.flip(kernel_reshaped, [-1])
-        kernel_padded[:, :N] = kernel_flipped.to(torch.complex64)
+        kernel_complex = kernel_reshaped.to(torch.complex64)
+        signal_complex = signal_reshaped.to(torch.complex64)
 
-        # Take FFT of both
-        signal_fft = torch.fft.fft(signal_padded, dim=-1)
-        kernel_fft = torch.fft.fft(kernel_padded, dim=-1)
+        kernel_start = 0
+        kernel_end = kernel_start + N
+        signal_start = kernel_end + sep
+        signal_end = signal_start + M
 
-        # Multiply in frequency domain
-        conv_fft = signal_fft * kernel_fft
+        input_plane[:, kernel_start:kernel_end] = kernel_complex
+        input_plane[:, signal_start:signal_end] = signal_complex
 
-        # Optionally quantize in frequency domain
+        # Roll to center the input pattern
+        roll_amount = (plane_size // 2) - (M + signal_start) // 2
+        input_plane = torch.roll(input_plane, shifts=roll_amount, dims=-1)
+
+        # JTC physics: FFT -> fftshift -> Joint Power Spectrum (JPS)
+        jft = torch.fft.fft(input_plane, dim=-1)
+        jft_shifted = torch.fft.fftshift(jft, dim=-1)
+        jps = torch.abs(jft_shifted) ** 2
+        jps = jps / plane_size
+
+        # Quantize at JPS if enabled (Fourier plane quantization)
         if self.config.fourier_plane_bits is not None:
-            conv_fft_abs = torch.abs(conv_fft)
-            conv_fft_abs = self._apply_quantizer(
-                conv_fft_abs, self.config.fourier_plane_bits, domain="fourier"
-            )
-            conv_fft_phase = torch.angle(conv_fft)
-            conv_fft = conv_fft_abs * torch.exp(1j * conv_fft_phase)
-
-        # IFFT to get convolution result
-        # Use real part (imaginary part should be ~0 for real inputs)
-        conv_result = torch.fft.ifft(conv_fft, dim=-1)
-        output_plane_abs = conv_result.real
-
-        # Extract convolution output indices
-        # Use the output_length from config (auto-calculated or manually set)
-        # Formula from jtc_cycle_planner for finding valid output indices
-        delta = sep + 0.5 * (M + N)
-        conv_len = M + N - 1
-        half_conv = 0.5 * (conv_len - 1)
-        auto_right = max(M - 1, N - 1)
-
-        # Find the first valid index in the correlation output
-        start_j = None
-        for j in range(N - 1, M):
-            x_pos = delta + (j - half_conv)
-            if x_pos <= auto_right:
-                continue
-            start_j = j
-            break
-
-        if start_j is None:
-            raise ValueError(
-                f"No valid output indices found for input_length={M}, kernel_length={N}, "
-                f"plane_size={plane_size}, sep={sep}"
+            jps = self._apply_quantizer(
+                jps, self.config.fourier_plane_bits, domain="fourier"
             )
 
-        # Extract the usable outputs based on config.output_length
-        # If output_length is set in config, use it; otherwise calculate it
+        # Back to output plane: FFT -> fftshift -> magnitude
+        # Output is magnitude (light intensity), always positive
+        output_plane_fft = torch.fft.fft(jps, dim=-1)
+        output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
+        output_plane_abs = torch.abs(output_plane_shifted)
+
+        # Extract correlation output using golden code formula
+        # Formula: same_start = plane_size//2 + sep + N//2 + 1
+        same_start = plane_size // 2 + sep + N // 2 + 1
+
+        # Extract full correlation (M+N-1 outputs) if config allows
+        # For properly sized planes with adequate separation, full correlation is overlap-free
         if self.config.output_length is not None:
             output_length = self.config.output_length
         else:
-            # Calculate using _compute_usable_outputs
-            from onn_component import JTC
-            output_length = JTC._compute_usable_outputs(M, N, plane_size, sep)
+            # Default: extract full correlation length (M+N-1)
+            output_length = M + N - 1
 
-        # Extract indices from the correlation output, wrapping around plane_size
+        # Extract indices, wrapping around plane_size
         output_indices = torch.arange(
-            start_j,
-            start_j + output_length,
+            same_start,
+            same_start + output_length,
             device=x.device
         ) % plane_size
 

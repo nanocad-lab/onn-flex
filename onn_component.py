@@ -479,19 +479,10 @@ class JTC(nn.Module):
         self.loss = float(config.loss)
 
         # Calculate output_length if not specified
+        # Default: full correlation length (M+N-1)
+        # For proper separation/plane size, all correlation outputs are overlap-free
         if config.output_length is None:
-            self.output_length = self._compute_usable_outputs(
-                self.input_length,
-                self.kernel_length,
-                self.jtc_total_field,
-                self.jtc_separation
-            )
-            if self.output_length <= 0:
-                raise ValueError(
-                    f"No valid outputs for the given configuration: "
-                    f"input_length={self.input_length}, kernel_length={self.kernel_length}, "
-                    f"jtc_total_field={self.jtc_total_field}, jtc_separation={self.jtc_separation}"
-                )
+            self.output_length = self.input_length + self.kernel_length - 1
         else:
             self.output_length = config.output_length
 
