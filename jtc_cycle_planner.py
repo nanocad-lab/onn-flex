@@ -10,34 +10,36 @@ WIDTH = 32
 KERNEL_HEIGHT = 3
 
 def usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
-    #validcheck
+    """Calculate number of usable correlation outputs for given JTC configuration.
+
+    Based on golden code: with proper separation, ALL M+N-1 correlation outputs
+    are overlap-free with autocorrelation terms.
+
+    Args:
+        input_len: Length of input signal (M)
+        kernel_len: Length of kernel (N)
+        lens_size: Total size of JTC plane
+        sep: Separation between kernel and signal
+
+    Returns:
+        Number of usable outputs (M+N-1 if valid, 0 otherwise)
+    """
+    # Validity checks
     if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
         return 0
     if input_len < kernel_len:
         return 0
     if sep < 0:
         return 0
+
+    # Check if configuration fits in lens plane
+    # Need space for: kernel (N) + separation (sep) + signal (M)
     if input_len + kernel_len + sep > lens_size:
         return 0
-    
-    #from overlapgen/paper formula
-    delta = sep + 0.5 * (input_len + kernel_len)
-    conv_len = input_len + kernel_len - 1
-    half_conv = 0.5 * (conv_len - 1)
-    auto_right = max(input_len - 1, kernel_len - 1)
-    lens_right = 0.5 * (lens_size - 1)
-    run = best = 0
-    for j in range(kernel_len - 1, input_len):
-        x = delta + (j - half_conv)
-        if x <= auto_right:
-            run = 0
-            continue
-        if x > lens_right:
-            break
-        run += 1
-        if run > best:
-            best = run
-    return best
+
+    # With proper separation, all correlation outputs are usable
+    # Full correlation length is M + N - 1
+    return input_len + kernel_len - 1
 
 
 def cycles_for_config(

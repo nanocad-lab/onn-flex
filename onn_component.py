@@ -422,9 +422,10 @@ class LER_variation(nn.Module):
 class JTC(nn.Module):
     @staticmethod
     def _compute_usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
-        """Compute the number of usable outputs for given JTC parameters.
+        """Calculate number of usable correlation outputs for given JTC configuration.
 
-        This implements the formula from jtc_cycle_planner.py.
+        Based on golden code: with proper separation, ALL M+N-1 correlation outputs
+        are overlap-free with autocorrelation terms.
 
         Args:
             input_len: Length of input signal (M)
@@ -433,37 +434,24 @@ class JTC(nn.Module):
             sep: Separation between kernel and signal
 
         Returns:
-            Number of usable correlation outputs
+            Number of usable outputs (M+N-1 if valid, 0 otherwise)
         """
-        # Validation checks
+        # Validity checks
         if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
             return 0
         if input_len < kernel_len:
             return 0
         if sep < 0:
             return 0
+
+        # Check if configuration fits in lens plane
+        # Need space for: kernel (N) + separation (sep) + signal (M)
         if input_len + kernel_len + sep > lens_size:
             return 0
 
-        # Formula from jtc_cycle_planner.py
-        delta = sep + 0.5 * (input_len + kernel_len)
-        conv_len = input_len + kernel_len - 1
-        half_conv = 0.5 * (conv_len - 1)
-        auto_right = max(input_len - 1, kernel_len - 1)
-        lens_right = 0.5 * (lens_size - 1)
-
-        run = best = 0
-        for j in range(kernel_len - 1, input_len):
-            x = delta + (j - half_conv)
-            if x <= auto_right:
-                run = 0
-                continue
-            if x > lens_right:
-                break
-            run += 1
-            if run > best:
-                best = run
-        return best
+        # With proper separation, all correlation outputs are usable
+        # Full correlation length is M + N - 1
+        return input_len + kernel_len - 1
 
     def __init__(self, config: AppConfig):
         super(JTC, self).__init__()
@@ -516,52 +504,6 @@ class JTC(nn.Module):
             "output_quant",
             "output_slice",
         ]
-
-    @staticmethod
-    def _compute_usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
-        """Compute the number of usable output values from JTC.
-
-        This implements the logic from jtc_cycle_planner.py to find the longest
-        contiguous run of valid output indices that avoid autocorrelation artifacts
-        and fit within the lens.
-
-        Args:
-            input_len: Length of input signal
-            kernel_len: Length of kernel/weight
-            lens_size: Size of JTC lens (jtc_total_field)
-            sep: Separation between kernel and signal
-
-        Returns:
-            Number of usable output values
-        """
-        # Validation
-        if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
-            return 0
-        if input_len < kernel_len:
-            return 0
-        if sep < 0:
-            return 0
-        if input_len + kernel_len + sep > lens_size:
-            return 0
-
-        # From jtc_cycle_planner formula
-        delta = sep + 0.5 * (input_len + kernel_len)
-        conv_len = input_len + kernel_len - 1
-        half_conv = 0.5 * (conv_len - 1)
-        auto_right = max(input_len - 1, kernel_len - 1)
-        lens_right = 0.5 * (lens_size - 1)
-        run = best = 0
-        for j in range(kernel_len - 1, input_len):
-            x = delta + (j - half_conv)
-            if x <= auto_right:
-                run = 0
-                continue
-            if x > lens_right:
-                break
-            run += 1
-            if run > best:
-                best = run
-        return best
 
     def _compute_valid_output_indices(self, device) -> tuple[torch.Tensor, int]:
         """Compute the valid output indices for extracting correlation output.

@@ -22,13 +22,12 @@ class TestVariableLengths:
     """Test suite for variable length support."""
 
     def test_usable_outputs_calculation(self):
-        """Test that usable_outputs from jtc_cycle_planner still works for reference."""
-        # These are the jtc_cycle_planner results (for overlap-free "same" conv)
-        # But we now default to full correlation (M+N-1)
-        assert JTC._compute_usable_outputs(8, 3, 32, 7) == 6
-        assert JTC._compute_usable_outputs(16, 8, 48, 9) == 7
-        assert JTC._compute_usable_outputs(16, 8, 64, 15) == 9
-        assert JTC._compute_usable_outputs(8, 8, 48, 8) == 1  # Old buggy case
+        """Test that usable_outputs from jtc_cycle_planner is now correct (M+N-1)."""
+        # All return full correlation length M+N-1 when configuration is valid
+        assert JTC._compute_usable_outputs(8, 3, 32, 7) == 10   # 8+3-1 = 10
+        assert JTC._compute_usable_outputs(16, 8, 48, 9) == 23  # 16+8-1 = 23
+        assert JTC._compute_usable_outputs(16, 8, 64, 15) == 23 # 16+8-1 = 23
+        assert JTC._compute_usable_outputs(8, 8, 48, 8) == 15   # 8+8-1 = 15 (golden code case!)
 
     def test_jtc_initialization_with_auto_output_length(self):
         """Test that JTC correctly auto-calculates output_length as M+N-1."""
