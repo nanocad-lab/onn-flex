@@ -386,44 +386,43 @@ class FTconvlayer(_ConvNd):
         plane_size = int(self.config.jtc_total_field)
         sep = int(self.config.jtc_separation)
 
-        # Build input planes: place kernel [0:N], signal [N+sep:N+sep+M]
-        # IMPORTANT: Flip kernel for convolution (JTC computes correlation by default)
-        input_plane = torch.zeros(
+        # Standard FFT-based convolution: convolve signal with kernel
+        # For linear convolution via FFT, need to pad to at least M+N-1 to avoid circular wrap
+        # We'll use plane_size which should be >= M+N-1
+        signal_padded = torch.zeros(
             batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
         )
-        # Flip kernel to convert correlation to convolution
+        kernel_padded = torch.zeros(
+            batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
+        )
+
+        # Place signal at start
+        signal_padded[:, :M] = signal_reshaped.to(torch.complex64)
+        # Flip kernel before placing (FFT gives convolution, PyTorch conv1d is correlation)
+        # So we flip to convert: FFT-convolution(signal, flip(kernel)) = correlation(signal, kernel)
         kernel_flipped = torch.flip(kernel_reshaped, [-1])
-        kernel_complex = kernel_flipped.to(torch.complex64)
-        signal_complex = signal_reshaped.to(torch.complex64)
+        kernel_padded[:, :N] = kernel_flipped.to(torch.complex64)
 
-        kernel_start = 0
-        kernel_end = kernel_start + N  # N is kernel_length
-        signal_start = kernel_end + sep
-        signal_end = signal_start + M  # M is input_length
+        # Take FFT of both
+        signal_fft = torch.fft.fft(signal_padded, dim=-1)
+        kernel_fft = torch.fft.fft(kernel_padded, dim=-1)
 
-        input_plane[:, kernel_start:kernel_end] = kernel_complex
-        input_plane[:, signal_start:signal_end] = signal_complex
+        # Multiply in frequency domain
+        conv_fft = signal_fft * kernel_fft
 
-        # Roll to center
-        roll_amount = (plane_size // 2) - (M + signal_start) // 2
-        input_plane = torch.roll(input_plane, shifts=roll_amount, dims=-1)
-
-        # JFT -> JPS (Joint Power Spectrum)
-        # No shift needed - work directly in FFT order
-        jft = torch.fft.fft(input_plane, dim=-1)
-        jps_batch = torch.abs(jft) ** 2
-        jps_batch = jps_batch / plane_size
-
-        # Quantize at JPS if enabled (Fourier-plane quantization point)
+        # Optionally quantize in frequency domain
         if self.config.fourier_plane_bits is not None:
-            jps_batch = self._apply_quantizer(
-                jps_batch.real, self.config.fourier_plane_bits, domain="fourier"
+            conv_fft_abs = torch.abs(conv_fft)
+            conv_fft_abs = self._apply_quantizer(
+                conv_fft_abs, self.config.fourier_plane_bits, domain="fourier"
             )
+            conv_fft_phase = torch.angle(conv_fft)
+            conv_fft = conv_fft_abs * torch.exp(1j * conv_fft_phase)
 
-        # Back to output plane and take magnitude
-        # Use IFFT to convert from frequency domain back to spatial domain
-        output_plane_ifft = torch.fft.ifft(jps_batch, dim=-1)
-        output_plane_abs = torch.abs(output_plane_ifft)
+        # IFFT to get convolution result
+        # Use real part (imaginary part should be ~0 for real inputs)
+        conv_result = torch.fft.ifft(conv_fft, dim=-1)
+        output_plane_abs = conv_result.real
 
         # Extract convolution output indices
         # Use the output_length from config (auto-calculated or manually set)
