@@ -180,19 +180,27 @@ class TestVariableLengths:
         assert output.shape[1] == 2  # out_channels
         assert torch.isfinite(output).all()
 
-    def _pytorch_conv_reference(self, signal, kernel):
-        """Compute reference convolution using PyTorch."""
+    def _pytorch_correlation_reference(self, signal, kernel):
+        """Compute reference correlation using PyTorch.
+
+        Correlation is like convolution but without flipping the kernel.
+        We implement it as: correlation(x, h) = convolution(x, flip(h))
+        """
         # signal: [batch, input_len]
         # kernel: [kernel_len]
-        # Returns: [batch, output_len] where output_len = input_len - kernel_len + 1
+        # Returns: [batch, output_len] where output_len = input_len + kernel_len - 1
 
         # Reshape for conv1d: signal needs [batch, channels=1, length]
         signal_conv = signal.unsqueeze(1)  # [batch, 1, input_len]
-        kernel_conv = kernel.unsqueeze(0).unsqueeze(0)  # [1, 1, kernel_len]
+        # Flip the kernel for correlation (correlation = conv with flipped kernel)
+        kernel_flipped = torch.flip(kernel, [0])
+        kernel_conv = kernel_flipped.unsqueeze(0).unsqueeze(0)  # [1, 1, kernel_len]
 
-        # Apply 1D convolution with valid padding
-        output = F.conv1d(signal_conv, kernel_conv, padding=0)  # [batch, 1, output_len]
-        return output.squeeze(1)  # [batch, output_len]
+        # Apply 1D convolution with full padding to get correlation
+        # For full correlation, we need padding of kernel_len - 1
+        padding = len(kernel) - 1
+        output = F.conv1d(signal_conv, kernel_conv, padding=padding)  # [batch, 1, input_len+kernel_len-1]
+        return output.squeeze(1)  # [batch, input_len+kernel_len-1]
 
     @pytest.mark.parametrize("input_len,kernel_len,lens,sep", [
         (8, 3, 32, 7),
@@ -200,7 +208,7 @@ class TestVariableLengths:
         (16, 8, 64, 15),
     ])
     def test_fourier_vs_pytorch_conv(self, input_len, kernel_len, lens, sep):
-        """Test that Fourier backend matches PyTorch conv (within tolerance)."""
+        """Test that Fourier backend matches PyTorch correlation (within tolerance)."""
         config = AppConfig(
             input_length=input_len,
             kernel_length=kernel_len,
@@ -223,17 +231,16 @@ class TestVariableLengths:
         signal = torch.randn(batch_size, input_len) * 0.1
         kernel = torch.randn(kernel_len) * 0.1
 
-        # Compute reference PyTorch conv
-        pytorch_result = self._pytorch_conv_reference(signal, kernel)
+        # Compute reference PyTorch correlation (JTC does correlation, not convolution)
+        pytorch_corr = self._pytorch_correlation_reference(signal, kernel)
 
-        # Extract the usable portion from PyTorch result
-        # The usable outputs start at an offset determined by jtc_cycle_planner
+        # Find which indices in the full correlation are usable (from jtc_cycle_planner)
         conv_len = input_len + kernel_len - 1
         delta = sep + 0.5 * (input_len + kernel_len)
         half_conv = 0.5 * (conv_len - 1)
         auto_right = max(input_len - 1, kernel_len - 1)
 
-        # Find first valid index in the full convolution output
+        # Find first valid index in the full correlation output
         start_j = None
         for j in range(kernel_len - 1, input_len):
             x = delta + (j - half_conv)
@@ -242,9 +249,9 @@ class TestVariableLengths:
             start_j = j
             break
 
-        # Extract usable outputs from PyTorch result
+        # Extract usable outputs from PyTorch correlation
         if start_j is not None:
-            pytorch_usable = pytorch_result[:, start_j:start_j + usable_output_len]
+            pytorch_usable = pytorch_corr[:, start_j:start_j + usable_output_len]
         else:
             pytest.skip("No valid indices found")
 
