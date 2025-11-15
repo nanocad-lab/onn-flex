@@ -19,22 +19,25 @@ class TestContaminationProfile:
 
     def test_contamination_profile_basic(self):
         """Test basic contamination profile computation."""
-        # Config with zero contamination
+        # Config with good separation
         M, N, plane, sep = 16, 8, 64, 15
 
         total, clean, stride = compute_contamination_profile(M, N, plane, sep)
 
         # Should get full correlation length
         assert total == M + N - 1  # 23
-        # Most or all should be clean for this config
-        assert clean >= total * 0.8
+        # clean is the number of clean VALID outputs (M-N+1 = 9)
+        num_valid = M - N + 1
+        assert clean <= num_valid
+        # Most or all valid outputs should be clean for this config
+        assert clean >= num_valid * 0.8
         # Stride should be reasonable
         assert stride > 0
-        assert stride <= total
+        assert stride <= num_valid
 
         print(f"\nM={M}, N={N}, plane={plane}, sep={sep}")
         print(f"  Total outputs: {total}")
-        print(f"  Clean outputs: {clean}")
+        print(f"  Clean valid outputs: {clean}/{num_valid}")
         print(f"  Effective stride: {stride}")
 
     def test_contamination_profile_tight_config(self):
@@ -212,7 +215,13 @@ class TestCyclesForConfig:
             assert total > 0
 
             # Verify stitching covers full width
-            assert passes * stride >= 30
+            # cycles_for_config uses WIDTH=32 from jtc_cycle_planner
+            # out_w = WIDTH - N + 1
+            import math
+            WIDTH = 32  # From jtc_cycle_planner
+            out_w = WIDTH - N + 1
+            expected_passes = math.ceil(out_w / stride)
+            assert passes == expected_passes, f"Expected {expected_passes} passes for width {out_w} with stride {stride}, got {passes}"
 
 
 class TestStitchingEdgeCases:

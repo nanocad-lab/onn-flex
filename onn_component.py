@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
 import math
+from jtc_cycle_planner import compute_contamination_profile
 
 # NEW: Helper functions to compute ideal (reference) transfer function coefficients
 
@@ -424,8 +425,8 @@ class JTC(nn.Module):
     def _compute_usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
         """Calculate number of usable correlation outputs for given JTC configuration.
 
-        Based on golden code: with proper separation, ALL M+N-1 correlation outputs
-        are overlap-free with autocorrelation terms.
+        Uses contamination-aware cycle planner to determine clean valid outputs.
+        Accounts for autocorrelation contamination and edge effects.
 
         Args:
             input_len: Length of input signal (M)
@@ -434,7 +435,7 @@ class JTC(nn.Module):
             sep: Separation between kernel and signal
 
         Returns:
-            Number of usable outputs (M+N-1 if valid, 0 otherwise)
+            Number of clean valid outputs for stitching (effective stride)
         """
         # Validity checks
         if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
@@ -449,9 +450,13 @@ class JTC(nn.Module):
         if input_len + kernel_len + sep > lens_size:
             return 0
 
-        # With proper separation, all correlation outputs are usable
-        # Full correlation length is M + N - 1
-        return input_len + kernel_len - 1
+        # Use contamination-aware cycle planner
+        # Returns: (total_outputs, clean_valid_outputs, effective_stride)
+        _, clean_valid, effective_stride = compute_contamination_profile(
+            input_len, kernel_len, lens_size, sep
+        )
+
+        return effective_stride
 
     def __init__(self, config: AppConfig):
         super(JTC, self).__init__()
@@ -468,7 +473,8 @@ class JTC(nn.Module):
 
         # Calculate output_length if not specified
         # Default: full correlation length (M+N-1)
-        # For proper separation/plane size, all correlation outputs are overlap-free
+        # Note: Some outputs may have autocorrelation contamination depending on config
+        # Use effective_stride (computed below) for clean stitching
         if config.output_length is None:
             self.output_length = self.input_length + self.kernel_length - 1
         else:
@@ -481,6 +487,31 @@ class JTC(nn.Module):
                 f"input_length ({self.input_length}) + kernel_length ({self.kernel_length}) + "
                 f"separation ({self.jtc_separation}) = {self.input_length + self.kernel_length + self.jtc_separation}"
             )
+
+        # Analyze contamination profile using cycle planner
+        total_outputs, clean_valid_outputs, effective_stride = compute_contamination_profile(
+            self.input_length, self.kernel_length, self.jtc_total_field, self.jtc_separation
+        )
+        self.total_correlation_outputs = total_outputs
+        self.clean_valid_outputs = clean_valid_outputs
+        self.effective_stride = effective_stride
+
+        # Report contamination status (only if significant)
+        # Note: clean_valid_outputs is the number of clean outputs in the valid convolution region
+        # For valid conv, we use M-N+1 outputs from the M+N-1 correlation
+        num_valid_outputs = self.input_length - self.kernel_length + 1
+        if num_valid_outputs > 0:
+            valid_contamination_percent = 100 * (1 - clean_valid_outputs / num_valid_outputs)
+            if valid_contamination_percent > 10:
+                import warnings
+                warnings.warn(
+                    f"JTC config has {valid_contamination_percent:.1f}% contamination in valid outputs: "
+                    f"M={self.input_length}, N={self.kernel_length}, "
+                    f"plane={self.jtc_total_field}, sep={self.jtc_separation}. "
+                    f"Clean valid outputs: {clean_valid_outputs}/{num_valid_outputs}, "
+                    f"Effective stride: {effective_stride}",
+                    UserWarning
+                )
 
         # Ordered list of available stage names
         self.stage_order = [
