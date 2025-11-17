@@ -124,8 +124,8 @@ def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
 
     # Random batch of signals/kernels in [-1, 1]
     torch.manual_seed(0)
-    signal = torch.randn(1, 1, 1, config.jtc_half_size) / 4
-    kernel = torch.randn(1, config.jtc_half_size) / 4
+    signal = torch.randn(1, 1, 1, config.input_length) / 4
+    kernel = torch.randn(1, config.kernel_length) / 4
     out = jtc(signal, kernel)
 
     if not torch.isfinite(out).all():
@@ -153,8 +153,8 @@ def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
     jtc = JTC(config)
 
     torch.manual_seed(1)
-    signal = torch.randn(1, 1, 1, config.jtc_half_size) / 4
-    kernel = torch.randn(1, config.jtc_half_size) / 4
+    signal = torch.randn(1, 1, 1, config.input_length) / 4
+    kernel = torch.randn(1, config.kernel_length) / 4
 
     input_plane = jtc.generate_input_plane(signal, kernel)
     jft = jtc.post_fft(input_plane)

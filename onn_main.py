@@ -98,22 +98,34 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
 
     # JTC parameters
     parser.add_argument(
-        "--jtc-half-size",
+        "--input-length",
         type=int,
-        default=yaml_config.jtc_half_size,
-        help="Half of the total size of the JTC",
+        default=yaml_config.input_length,
+        help="Length of input signal",
+    )
+    parser.add_argument(
+        "--kernel-length",
+        type=int,
+        default=yaml_config.kernel_length,
+        help="Length of kernel/weight",
+    )
+    parser.add_argument(
+        "--output-length",
+        type=int,
+        default=yaml_config.output_length,
+        help="Length of output (auto-calculated if not specified)",
     )
     parser.add_argument(
         "--jtc-separation",
         type=int,
         default=yaml_config.jtc_separation,
-        help="Separation between kernel and weight",
+        help="Separation between kernel and signal",
     )
     parser.add_argument(
         "--jtc-total-field",
         type=int,
         default=yaml_config.jtc_total_field,
-        help="Total size of the JTC plane",
+        help="Total size of the JTC plane (lens size)",
     )
 
     # Quantization parameters

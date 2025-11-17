@@ -5,7 +5,9 @@ dac_bits: 4
 driver_distortion_data_path: ./component_data/driver_sim_data.csv
 driver_distortion_polyfit_order: 3
 driver_distortion_strength: 0.0
-jtc_half_size: 8
+input_length: 8
+kernel_length: 8
+output_length: null
 jtc_separation: 8
 jtc_total_field: 48
 mrm_phase_data_path: ./component_data/mrm_phase_sim_data.csv

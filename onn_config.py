@@ -13,9 +13,11 @@ class AppConfig:
     output_dir: str = "./output"
 
     # JTC parameters
-    jtc_half_size: int = 8  # half of the total size of the JTC
-    jtc_separation: int = 0  # separation between kernel and weight
-    jtc_total_field: int = 16  # total size of the JTC plane
+    input_length: int = 8  # length of input signal
+    kernel_length: int = 8  # length of kernel/weight
+    output_length: Optional[int] = None  # length of output (auto-calculated if None)
+    jtc_separation: int = 0  # separation between kernel and signal
+    jtc_total_field: int = 16  # total size of the JTC plane (lens size)
 
     # Quantization parameters
     dac_bits: Optional[int] = 4

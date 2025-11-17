@@ -46,8 +46,8 @@ def compute_snr_enob(
     out_list = []
     ref_list = []
     for _ in range(num_tests):
-        signal = torch.rand(1, 1, 1, config.jtc_half_size)
-        kernel = torch.rand(1, config.jtc_half_size)
+        signal = torch.rand(1, 1, 1, config.input_length)
+        kernel = torch.rand(1, config.kernel_length)
         out_list.append(jtc(signal, kernel))
         ref_list.append(jtc_ref(signal, kernel))
 
@@ -84,8 +84,8 @@ def compute_snr_jps(
     ref_jps_list = []
     for _ in range(num_tests):
         # Random 1-D test vectors (same dimensions used in *compute_snr_enob*)
-        signal = torch.rand(1, config.jtc_half_size)
-        kernel = torch.rand(1, config.jtc_half_size)
+        signal = torch.rand(1, config.input_length)
+        kernel = torch.rand(1, config.kernel_length)
 
         # Build input plane and propagate to JPS for the distorted JTC
         input_plane = jtc.generate_input_plane(signal, kernel)

@@ -101,8 +101,8 @@ def test_helper_methods():
     indices = jtc.compute_correlation_indices(torch.device("cpu"))
     print(f"  Indices shape: {indices.shape}")
     print(f"  Indices range: [{indices.min()}, {indices.max()}]")
-    print(f"  Expected length: {jtc.jtc_half_size}")
-    print(f"  {'✓ PASS' if len(indices) == jtc.jtc_half_size else '✗ FAIL'}")
+    print(f"  Expected length: {jtc.output_length}")
+    print(f"  {'✓ PASS' if len(indices) == jtc.output_length else '✗ FAIL'}")
 
     # Test build_input_plane
     print("\n[2.3] Testing build_input_plane()...")
