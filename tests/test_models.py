@@ -29,6 +29,8 @@ class TestModelRegistry:
         config = AppConfig(
             model_name=model_name,
             conv_backend="pytorch",
+            input_length=32,
+            kernel_length=8,
             dac_bits=None,
             adc_bits=None,
             jtc_total_field=64,

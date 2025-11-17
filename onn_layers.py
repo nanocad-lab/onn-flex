@@ -463,13 +463,24 @@ class FTconvlayer(_ConvNd):
 
     def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # Original JTC implementation with variable length support
-        x_shape = x.shape
-        w = x.shape[2]
-        output = torch.zeros(x_shape[0], self.out_channels, w, w, device=x.device)
+        batch_size, _, height, width = x.shape
+
+        patch_size = self.config.input_length
+        if patch_size <= 0:
+            raise ValueError("input_length must be positive for conv_forward")
+
+        padded_height = math.ceil(height / patch_size) * patch_size
+        pad_bottom = padded_height - height
+        if pad_bottom > 0:
+            x = F.pad(x, (0, 0, 0, pad_bottom))
+
+        output = torch.zeros(
+            batch_size, self.out_channels, padded_height, width, device=x.device
+        )
         x = x.permute(0, 3, 1, 2)
 
         # Use configured input_length for patching
-        patch_size = self.config.input_length
+        # (patch_size already defined)
 
         for c_in in range(x.shape[2]):
             x_c = x[:, :, c_in : c_in + 1, ...]
@@ -509,6 +520,8 @@ class FTconvlayer(_ConvNd):
                 # Get the actual output length
                 actual_out_len = system_out.shape[2]
                 output[:, c_out_start:c_out_end, patch_size * i_p : patch_size * i_p + actual_out_len, :] += system_out
+        if pad_bottom > 0:
+            output = output[:, :, :height, :]
         return output
 
     def pseudo_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

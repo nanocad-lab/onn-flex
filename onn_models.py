@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from jtc_cycle_planner import cycles_for_config
+from jtc_cycle_planner import WIDTH as CIFAR_WIDTH, cycles_for_config
 from onn_config import AppConfig
 from onn_layers import FTconvlayer
 
@@ -14,7 +14,7 @@ from onn_layers import FTconvlayer
 def _find_optimal_lengths(
     lens_size: int,
     kernel_length_candidates: Sequence[int],
-    input_length_range: Iterable[int],
+    input_length_candidates: Sequence[int],
 ) -> Tuple[int, int, int, int]:
     """Search for the best (input_len, kernel_len, sep, stride) tuple."""
     best_config: Tuple[int, int, int, int] | None = None
@@ -22,7 +22,7 @@ def _find_optimal_lengths(
     best_stride: int | None = None
 
     for kernel_len in kernel_length_candidates:
-        for input_len in input_length_range:
+        for input_len in input_length_candidates:
             if input_len < kernel_len:
                 continue
             max_sep = lens_size - (input_len + kernel_len)
@@ -63,9 +63,35 @@ def _maybe_plan_jtc_lengths(config: AppConfig, model_name: str) -> None:
         return
 
     lens_size = int(config.jtc_total_field or 64)
-    input_range = range(3, min(33, lens_size + 1))
+
+    max_input = getattr(config, "input_length", None)
+    max_kernel = getattr(config, "kernel_length", None)
+
+    input_cap = min(
+        lens_size,
+        CIFAR_WIDTH,
+        max_input if max_input is not None and max_input > 0 else CIFAR_WIDTH,
+    )
+    if input_cap < 3:
+        raise ValueError(
+            "Maximum input_length is too small for auto planning. "
+            "Increase --input-length or disable auto_plan_jtc_lengths."
+        )
+    input_candidates = list(range(3, input_cap + 1))
+
+    kernel_cap = min(
+        lens_size,
+        max_kernel if max_kernel is not None and max_kernel > 0 else lens_size,
+    )
+    kernel_candidates = [k for k in [3, 5, 7, 9, 11] if k <= kernel_cap]
+    if not kernel_candidates:
+        raise ValueError(
+            "Maximum kernel_length is too small for auto planning. "
+            "Increase --kernel-length or disable auto_plan_jtc_lengths."
+        )
+
     input_len, kernel_len, sep, stride = _find_optimal_lengths(
-        lens_size, kernel_length_candidates=[3], input_length_range=input_range
+        lens_size, kernel_candidates, input_candidates
     )
 
     if (
