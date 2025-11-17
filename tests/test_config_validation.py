@@ -48,6 +48,8 @@ def test_config_defaults():
     # Check default backend
     assert config.conv_backend == "jtc_emulation"
     print(f"  ✓ Default backend: {config.conv_backend}")
+    assert config.model_name == "fftconv"
+    print(f"  ✓ Default model: {config.model_name}")
 
     # Check that old flags don't exist
     assert not hasattr(config, "use_pytorch_conv")
@@ -59,7 +61,8 @@ def test_config_defaults():
     assert config.kernel_length == 8
     assert config.output_length is None  # Auto-calculated
     assert config.jtc_separation == 0
-    assert config.jtc_total_field == 16
+    assert config.jtc_total_field == 64
+    assert config.auto_plan_jtc_lengths is True
     assert config.dac_bits == 4
     assert config.adc_bits == 6
     print("  ✓ Other config defaults intact")

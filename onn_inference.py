@@ -6,7 +6,8 @@ import yaml
 
 from onn_config import AppConfig
 from onn_component import JTC
-from onn_train import FFTConvNet, evaluate, get_data_loaders
+from onn_models import build_model
+from onn_train import evaluate, get_data_loaders
 
 
 def load_config_from_yaml(path: str) -> AppConfig:
@@ -21,7 +22,7 @@ def run_inference(config: AppConfig, weights_path: str) -> float:
     """Run inference using *weights_path* and return accuracy."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _, testloader = get_data_loaders(config.batch_size)
-    model = FFTConvNet(config).to(device)
+    model = build_model(config).to(device)
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("model_state_dict", ckpt)
     model.load_state_dict(state_dict)

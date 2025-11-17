@@ -8,6 +8,7 @@ class AppConfig:
 
     # These control the config loading/saving but aren't part of the actual app config
     config_file: Optional[str] = None
+    model_name: str = "fftconv"
 
     # These values will be overridable from CLI or YAML
     output_dir: str = "./output"
@@ -17,7 +18,8 @@ class AppConfig:
     kernel_length: int = 8  # length of kernel/weight
     output_length: Optional[int] = None  # length of output (auto-calculated if None)
     jtc_separation: int = 0  # separation between kernel and signal
-    jtc_total_field: int = 16  # total size of the JTC plane (lens size)
+    jtc_total_field: int = 64  # total size of the JTC plane (lens size)
+    auto_plan_jtc_lengths: bool = True
 
     # Quantization parameters
     dac_bits: Optional[int] = 4
@@ -26,30 +28,30 @@ class AppConfig:
 
     # Driver parameters
     driver_distortion_strength: float = 0.0
-    driver_distortion_data_path: str = "./data/driver_distortion_data.csv"
+    driver_distortion_data_path: str = "./component_data/driver_sim_data.csv"
     driver_distortion_polyfit_order: Optional[int] = None
 
     # PD/TIA parameters
     pd_tia_distortion_strength: float = 0.0
-    pd_tia_distortion_data_path: str = "./data/pd_tia_distortion_data.csv"
+    pd_tia_distortion_data_path: str = "./component_data/pd_tia_sim_data.csv"
     pd_tia_distortion_polyfit_order: Optional[int] = None
 
-    pd_distortion_data_path: str = "./data/pd_distortion_data.csv"
+    pd_distortion_data_path: str = "./component_data/pd_sim_data.csv"
     pd_distortion_polyfit_order: Optional[int] = None
     pd_distortion_strength: float = 0.0
 
-    tia_distortion_data_path: str = "./data/tia_distortion_data.csv"
+    tia_distortion_data_path: str = "./component_data/tia_sim_data.csv"
     tia_distortion_polyfit_order: Optional[int] = None
     tia_distortion_strength: float = 0.0
 
     # MRM power parameters
     mrm_power_distortion_strength: float = 0.0
-    mrm_power_data_path: str = "./data/mrm_power_data.csv"
+    mrm_power_data_path: str = "./component_data/mrm_pwr_w_sim_data.csv"
     mrm_power_polyfit_order: Optional[int] = None
 
     # MRM phase parameters
     mrm_phase_distortion_strength: float = 0.0
-    mrm_phase_data_path: str = "./data/mrm_phase_data.csv"
+    mrm_phase_data_path: str = "./component_data/mrm_phase_sim_data.csv"
     mrm_phase_polyfit_order: Optional[int] = None
 
     # LER process variation

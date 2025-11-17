@@ -13,9 +13,10 @@ if __package__ is None or __package__ == "":
 import torch
 import torch.profiler
 from torch.profiler import profile, record_function, ProfilerActivity
-from onn_train import get_data_loaders, FFTConvNet
+from onn_train import get_data_loaders
 from onn_main import load_yaml_config
 from onn_config import AppConfig
+from onn_models import build_model
 
 
 def profile_training() -> None:
@@ -34,7 +35,7 @@ def profile_training() -> None:
 
     # Get data
     trainloader, _ = get_data_loaders(config.batch_size)
-    model = FFTConvNet(config).to(device)
+    model = build_model(config).to(device)
 
     # Profiler setup
     activities = [ProfilerActivity.CPU]

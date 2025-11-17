@@ -4,6 +4,7 @@ import yaml
 from typing import Optional, Any, Dict
 from onn_train import train_onn_model
 from onn_config import AppConfig
+from onn_models import MODEL_REGISTRY
 
 
 def parse_initial_args() -> tuple[Optional[str], Optional[str]]:
@@ -75,6 +76,14 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.output_dir,
         help="Output directory for saving config",
     )
+    parser.add_argument(
+        "--model-name",
+        dest="model_name",
+        type=str,
+        default=yaml_config.model_name,
+        choices=sorted(MODEL_REGISTRY.keys()),
+        help="Model architecture to use",
+    )
 
     # # Simulation parameters
     # parser.add_argument(
@@ -126,6 +135,15 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         type=int,
         default=yaml_config.jtc_total_field,
         help="Total size of the JTC plane (lens size)",
+    )
+    parser.add_argument(
+        "--auto-plan-jtc-lengths",
+        dest="auto_plan_jtc_lengths",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=yaml_config.auto_plan_jtc_lengths,
+        help="Automatically choose optimal JTC lengths for compatible models (true/false)",
     )
 
     # Quantization parameters

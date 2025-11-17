@@ -8,16 +8,15 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-from onn_layers import FTconvlayer
 from onn_config import AppConfig
 from diagnostics.pretrain_tests import run_pretrain_tests
+from onn_models import FFTConvNet, build_model
 
 DISTORTION_STRENGTH_FIELDS = [
     f.name
@@ -82,89 +81,6 @@ def get_data_loaders(
 
 
 # -------------------------------
-#  Model definition
-# -------------------------------
-
-
-class FFTConvNet(nn.Module):
-    """Configurable variant of the 7-layer FFTConv network from `old_template.py`.
-
-    The number of identical intermediate blocks (originally 5) can be varied
-    through `config.num_identical_layers`."""
-
-    def __init__(self, config: AppConfig):
-        super().__init__()
-
-        # Stem
-        self.conv1 = FTconvlayer(
-            3,
-            8,
-            config=config,
-            kernel_size=8,
-            hv_concat=True,
-        )
-        self.bn1 = nn.BatchNorm2d(16)
-        self.maxpool1 = nn.MaxPool2d(2)
-
-        # Second block (fixed)
-        self.conv2 = FTconvlayer(
-            16,
-            16,
-            config=config,
-            kernel_size=8,
-            hv_concat=True,
-        )
-        self.bn2 = nn.BatchNorm2d(32)
-        self.maxpool2 = nn.MaxPool2d(2)
-
-        # Configurable sequence of identical blocks
-        class _MaxNorm(nn.Module):
-            def forward(self, x: torch.Tensor):
-                return x / x.max().clamp_min(1e-12)
-
-        blocks = []
-        for _ in range(config.num_identical_layers):
-            seq = [
-                FTconvlayer(
-                    32,
-                    16,
-                    config=config,
-                    kernel_size=8,
-                    hv_concat=True,
-                ),
-                nn.ReLU(inplace=True),
-            ]
-            if getattr(config, "normalize_blocks", False):
-                seq.append(_MaxNorm())
-            blocks.append(nn.Sequential(*seq))
-        self.blocks = nn.Sequential(*blocks)
-
-        # Classifier (identical to original template)
-        self.classifier = nn.Sequential(
-            nn.MaxPool2d(2),
-            nn.Flatten(),
-            nn.Linear(512, 256),
-            nn.Linear(256, 10),
-        )
-
-    # pylint: disable=arguments-differ
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
-        x = self.maxpool1(x)
-        x = F.relu(x)
-        x = x / x.max().clamp_min(1e-12)
-
-        x = self.conv2(x)
-        x = self.maxpool2(x)
-        x = F.relu(x)
-        x = x / x.max().clamp_min(1e-12)
-
-        x = self.blocks(x)
-        x = self.classifier(x)
-        return x
-
-
-# -------------------------------
 #  Training / evaluation helpers
 # -------------------------------
 
@@ -203,7 +119,7 @@ def run_full_strength_inference(
     for field in DISTORTION_STRENGTH_FIELDS:
         setattr(distortion_config, field, 1.0)
 
-    ref_model = FFTConvNet(distortion_config).to(device)
+    ref_model = build_model(distortion_config).to(device)
     ref_model.load_state_dict(model.state_dict())
 
     try:
@@ -265,7 +181,7 @@ def train_onn_model(config: AppConfig) -> float:
     trainloader, testloader = get_data_loaders(config.batch_size)
 
     # Build model
-    model = FFTConvNet(config).to(device)
+    model = build_model(config).to(device)
 
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:
