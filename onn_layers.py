@@ -7,6 +7,7 @@ from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
 from onn_config import AppConfig
 from onn_component import JTC
+from jtc_cycle_planner import compute_contamination_profile
 
 __all__ = ["FTconvlayer"]
 
@@ -328,7 +329,7 @@ class FTconvlayer(_ConvNd):
         return output
 
     def fourier_conv_forward(
-        self, x: torch.Tensor, weight: torch.Tensor
+        self, x: torch.Tensor, weight: torch.Tensor, preserve_phase: bool = False
     ) -> torch.Tensor:
         """Software JTC-style correlation via FFT with optional JPS quantization.
 
@@ -425,7 +426,10 @@ class FTconvlayer(_ConvNd):
         # Output is magnitude (light intensity), always positive
         output_plane_fft = torch.fft.fft(jps, dim=-1)
         output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
-        output_plane_abs = torch.abs(output_plane_shifted)
+        if preserve_phase:
+            correlation_plane = output_plane_shifted.real
+        else:
+            correlation_plane = torch.abs(output_plane_shifted)
 
         # Extract correlation output
         # Formula: same_start = plane_size//2 + sep + N//2
@@ -447,7 +451,7 @@ class FTconvlayer(_ConvNd):
             device=x.device
         ) % plane_size
 
-        convolution_output_batched = output_plane_abs[:, output_indices]
+        convolution_output_batched = correlation_plane[:, output_indices]
 
         # Reshape back to B H Cout output_length
         out = convolution_output_batched.reshape(B, H, C, output_length)
@@ -461,67 +465,94 @@ class FTconvlayer(_ConvNd):
             out = self._apply_quantizer(out, self.config.adc_bits, domain="output")
         return out
 
+    def _run_backend_patch(
+        self, patch: torch.Tensor, weight: torch.Tensor, backend: str
+    ) -> torch.Tensor:
+        """Run the configured backend on a 1-D patch and return [B, Cout, L]."""
+        self._validate_backend_sizes(patch, weight, backend)
+
+        match backend:
+            case "pytorch":
+                out = self.pytorch_conv_forward(patch, weight)
+            case "fourier":
+                out = self.fourier_conv_forward(patch, weight)
+            case "jtc_emulation":
+                out = self.jtc_emulation_forward(patch, weight)
+            case _:
+                raise ValueError(
+                    f"Unknown conv_backend: {backend}. "
+                    f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
+                )
+
+        # Output shape: [B, H=1, Cout, L] → squeeze height dimension
+        return out[:, 0, :, :]
+
     def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        # Original JTC implementation with variable length support
-        batch_size, _, height, width = x.shape
+        """Perform row-wise stitched convolution with contamination-aware stride."""
+        backend = self.config.conv_backend or "jtc_emulation"
 
-        patch_size = self.config.input_length
-        if patch_size <= 0:
-            raise ValueError("input_length must be positive for conv_forward")
+        batch_size, in_channels, height, width = x.shape
+        patch_len = int(self.config.input_length)
+        kernel_len = int(self.config.kernel_length)
+        if patch_len <= 0 or kernel_len <= 0:
+            raise ValueError("input_length and kernel_length must be positive")
+        if patch_len < kernel_len:
+            raise ValueError("input_length must be >= kernel_length")
 
-        padded_height = math.ceil(height / patch_size) * patch_size
-        pad_bottom = padded_height - height
-        if pad_bottom > 0:
-            x = F.pad(x, (0, 0, 0, pad_bottom))
+        _, _, effective_stride = compute_contamination_profile(
+            patch_len, kernel_len, self.config.jtc_total_field, self.config.jtc_separation
+        )
+        max_valid = max(1, patch_len - kernel_len + 1)
+        stride = effective_stride if effective_stride and effective_stride > 0 else max_valid
+        stride = min(stride, max_valid)
+
+        total_outputs = (
+            patch_len + kernel_len - 1
+            if self.config.output_length is None
+            else int(self.config.output_length)
+        )
+        pad_total = max(kernel_len - 1, 0)
+        pad_left = pad_total // 2
+        pad_right = pad_total - pad_left
+        valid_start = max(0, kernel_len - 1 - pad_left)
+        x_padded = F.pad(x, (pad_left, pad_right, 0, 0))
+        out_width = width
 
         output = torch.zeros(
-            batch_size, self.out_channels, padded_height, width, device=x.device
+            batch_size, self.out_channels, height, out_width, device=x.device, dtype=x.dtype
         )
-        x = x.permute(0, 3, 1, 2)
 
-        # Use configured input_length for patching
-        # (patch_size already defined)
-
-        for c_in in range(x.shape[2]):
-            x_c = x[:, :, c_in : c_in + 1, ...]
-            weight_c = weight[c_in, ...]
-            n_patch = int(x.shape[3] / patch_size)
+        for c_in in range(in_channels):
+            channel_data = x_padded[:, c_in, :, :]  # [B, H, W_pad]
+            weight_c = weight[c_in, ...]  # [cout_per_cin, patch_len]
             c_out_start = (c_in % self.groups) * self.cout_per_cin
             c_out_end = c_out_start + self.cout_per_cin
 
-            for i_p in range(n_patch):
-                patch = x_c[..., patch_size * i_p : patch_size * i_p + patch_size]
+            for row in range(height):
+                row_data = channel_data[:, row, :]  # [B, W_pad]
+                out_col = 0
+                pass_idx = 0
 
-                # Select backend based on conv_backend parameter
-                backend = self.config.conv_backend or "jtc_emulation"
+                while out_col < out_width:
+                    patch_start = pass_idx * stride
+                    patch = row_data[:, patch_start : patch_start + patch_len]
+                    if patch.shape[-1] < patch_len:
+                        patch = F.pad(patch, (0, patch_len - patch.shape[-1]))
+                    patch_4d = patch.view(batch_size, 1, 1, patch_len)
 
-                # Validate sizes for the selected backend
-                self._validate_backend_sizes(patch, weight_c, backend)
+                    patch_out = self._run_backend_patch(patch_4d, weight_c, backend)
+                    end_idx = min(total_outputs, valid_start + stride)
+                    if end_idx <= valid_start:
+                        break
+                    valid_slice = patch_out[:, :, valid_start:end_idx]
+                    usable = min(valid_slice.shape[-1], out_width - out_col)
+                    if usable <= 0:
+                        break
 
-                # Route to appropriate backend using match/case
-                match backend:
-                    case "pytorch":
-                        system_out = self.pytorch_conv_forward(patch, weight_c).permute(
-                            0, 2, 3, 1
-                        )
-                    case "fourier":
-                        system_out = self.fourier_conv_forward(patch, weight_c).permute(
-                            0, 2, 3, 1
-                        )
-                    case "jtc_emulation":
-                        system_out = self.jtc_emulation_forward(patch, weight_c).permute(
-                            0, 2, 3, 1
-                        )
-                    case _:
-                        raise ValueError(
-                            f"Unknown conv_backend: {backend}. "
-                            f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
-                        )
-                # Get the actual output length
-                actual_out_len = system_out.shape[2]
-                output[:, c_out_start:c_out_end, patch_size * i_p : patch_size * i_p + actual_out_len, :] += system_out
-        if pad_bottom > 0:
-            output = output[:, :, :height, :]
+                    output[:, c_out_start:c_out_end, row, out_col : out_col + usable] += valid_slice[:, :, :usable]
+                    out_col += usable
+                    pass_idx += 1
+
         return output
 
     def pseudo_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

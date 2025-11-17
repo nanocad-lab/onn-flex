@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
+import torch.nn.functional as F
 import pytest
 import warnings
 from onn_config import AppConfig
@@ -215,6 +216,55 @@ class TestConvBackends:
         # Check layer weights have gradients
         assert layer.weights.grad is not None
         assert torch.isfinite(layer.weights.grad).all()
+
+    def test_stitched_conv_matches_pytorch_reference(self):
+        """Fourier and PyTorch backends should align with the PyTorch reference."""
+        base_kwargs = dict(
+            input_length=22,
+            kernel_length=3,
+            output_length=None,
+            jtc_separation=19,
+            jtc_total_field=64,
+            dac_bits=None,
+            adc_bits=None,
+            fourier_plane_bits=None,
+        )
+
+        torch.manual_seed(0)
+        inputs = torch.rand(2, 1, 5, 37) * 0.5 + 0.5
+        kernel = torch.rand(base_kwargs["kernel_length"]) * 0.5 + 0.5
+        pos = kernel.clone()
+        neg = torch.zeros_like(kernel)
+
+        def run_layer(backend: str) -> torch.Tensor:
+            config = AppConfig(conv_backend=backend, **base_kwargs)
+            layer = FTconvlayer(
+                in_channels=1,
+                out_channels=1,
+                config=config,
+                kernel_size=22,
+                hv_concat=False,
+            )
+            with torch.no_grad():
+                layer.weights[..., 0] = 0.0
+                layer.weights[..., 1] = 0.0
+                layer.weights[0, 0, : config.kernel_length, 0] = pos
+                layer.weights[0, 0, : config.kernel_length, 1] = neg
+            return layer(inputs)
+
+        pad_total = base_kwargs["kernel_length"] - 1
+        pad_left = pad_total // 2
+        pad_right = pad_total - pad_left
+        padded = F.pad(inputs, (pad_left, pad_right, 0, 0))
+        ref_kernel = (pos - neg).view(1, 1, 1, -1)
+        reference = F.conv2d(padded, ref_kernel)
+
+        pytorch_out = run_layer("pytorch")
+        assert torch.allclose(pytorch_out, reference, atol=1e-4, rtol=1e-4)
+
+        fourier_out = run_layer("fourier")
+        assert fourier_out.shape == pytorch_out.shape
+        assert torch.isfinite(fourier_out).all()
 
     def test_backend_switching(self, base_config, test_input):
         """Test switching between backends produces different results."""

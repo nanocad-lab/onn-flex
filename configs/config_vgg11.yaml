@@ -1,6 +1,6 @@
-model_name: vgg16
-config_file: config_vgg16.yaml
-output_dir: ./output_vgg16
+model_name: vgg11
+config_file: config_vgg11.yaml
+output_dir: ./output_vgg11
 
 # Treat these as maximum lengths; builder will auto-plan tighter sizes.
 input_length: 32
