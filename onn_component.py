@@ -465,6 +465,20 @@ class JTC(nn.Module):
         self.mrm = MRM(config)
         self.pd = PD(config)
         self.tia = TIA(config)
+
+        # Optionally create simplified transfer functions
+        self.use_simplified_tf = getattr(config, 'simplify_transfer_functions', False)
+        if self.use_simplified_tf:
+            from simplified_transfer_functions import ComposedPDTIA
+            max_error = getattr(config, 'tf_simplification_max_error', 1e-4)
+            self.pd_tia_composed = ComposedPDTIA(
+                self.pd, self.tia,
+                enable_simplification=True,
+                max_error=max_error
+            )
+        else:
+            self.pd_tia_composed = None
+
         self.input_length = config.input_length
         self.kernel_length = config.kernel_length
         self.jtc_separation = config.jtc_separation
@@ -553,8 +567,14 @@ class JTC(nn.Module):
         x = x * self.loss
         if self.config.scale_output == "pd":
             x = self.scale_to_range(x, 1e-6, 1e-5)
-        x = self.pd(x)
-        x = self.tia(x)
+
+        # Use simplified PD-TIA composition if enabled
+        if self.use_simplified_tf and self.pd_tia_composed is not None:
+            x = self.pd_tia_composed(x)
+        else:
+            x = self.pd(x)
+            x = self.tia(x)
+
         if self.config.scale_output == "adc":
             x = x / x.max().clamp_min(1e-12)
         return x
@@ -770,13 +790,22 @@ class JTC(nn.Module):
         if self.config.scale_output == "pd":
             jps_base = self.scale_to_range(jps_base, 1e-6, 1e-5)
 
-        jps_pd = self.pd(jps_base)
-        if "jps_pd" in stages:
-            results["jps_pd"] = jps_pd[0, :].detach()
-
-        jps_tia = self.tia(jps_pd)
-        if "jps_tia" in stages:
-            results["jps_tia"] = jps_tia[0, :].detach()
+        # For stage visualization, always compute individual stages
+        if self.use_simplified_tf and self.pd_tia_composed is not None:
+            jps_tia = self.pd_tia_composed(jps_base)
+            # For visualization, also compute individual stages if requested
+            if "jps_pd" in stages:
+                jps_pd = self.pd(jps_base)
+                results["jps_pd"] = jps_pd[0, :].detach()
+            if "jps_tia" in stages:
+                results["jps_tia"] = jps_tia[0, :].detach()
+        else:
+            jps_pd = self.pd(jps_base)
+            if "jps_pd" in stages:
+                results["jps_pd"] = jps_pd[0, :].detach()
+            jps_tia = self.tia(jps_pd)
+            if "jps_tia" in stages:
+                results["jps_tia"] = jps_tia[0, :].detach()
 
         # Scale (ADC pre-scale)
         if self.config.scale_output == "adc":
@@ -815,13 +844,22 @@ class JTC(nn.Module):
         if self.config.scale_output == "pd":
             output_raw = self.scale_to_range(output_raw, 1e-6, 1e-5)
 
-        out_pd = self.pd(output_raw)
-        if "output_pd" in stages:
-            results["output_pd"] = out_pd[0, :].detach()
-
-        out_tia = self.tia(out_pd)
-        if "output_tia" in stages:
-            results["output_tia"] = out_tia[0, :].detach()
+        # Use simplified PD-TIA if enabled (second pass)
+        if self.use_simplified_tf and self.pd_tia_composed is not None:
+            out_tia = self.pd_tia_composed(output_raw)
+            # For visualization, compute individual stages if requested
+            if "output_pd" in stages:
+                out_pd = self.pd(output_raw)
+                results["output_pd"] = out_pd[0, :].detach()
+            if "output_tia" in stages:
+                results["output_tia"] = out_tia[0, :].detach()
+        else:
+            out_pd = self.pd(output_raw)
+            if "output_pd" in stages:
+                results["output_pd"] = out_pd[0, :].detach()
+            out_tia = self.tia(out_pd)
+            if "output_tia" in stages:
+                results["output_tia"] = out_tia[0, :].detach()
 
         if self.config.scale_output == "adc":
             out_scaled = out_tia / out_tia.max().clamp_min(1e-12)
@@ -842,37 +880,16 @@ class JTC(nn.Module):
 
         return results
 
-    def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        """Joint Transform Correlator forward pass.
-
-        Pipeline:
-        1. DAC quantization (dac_bits)
-        2. Input distortion (driver + MRM)
-        3. FFT to Fourier plane
-        4. Output distortion (loss + PD + TIA + scale)
-        5. Fourier plane quantization (fourier_plane_bits)
-        6. Input distortion (driver + MRM)
-        7. FFT to detector plane
-        8. Output distortion (loss + PD + TIA + scale)
-        9. ADC quantization (adc_bits)
-        10. Index selection
+    def _forward_impl(self, signal_reshaped: torch.Tensor, kernel_reshaped: torch.Tensor) -> torch.Tensor:
+        """Internal forward implementation for gradient checkpointing.
 
         Args:
-            signal: Input signal tensor (B, H, 1, W)
-            kernel: Kernel weights tensor (Cout, W)
+            signal_reshaped: Reshaped signal tensor
+            kernel_reshaped: Reshaped kernel tensor
 
         Returns:
-            Correlation output tensor (B, H, Cout, W)
+            Output tensor before final reshaping
         """
-        # Reshape inputs for batch processing
-        signal_full = signal.repeat(1, 1, kernel.shape[0], 1)
-        kernel_full = kernel.repeat(signal.shape[0], signal.shape[1], 1, 1)
-        batch_size_for_jtc = (
-            signal_full.shape[0] * signal_full.shape[1] * signal_full.shape[2]
-        )
-        signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.input_length)
-        kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.kernel_length)
-
         # Step 1: DAC quantization
         signal_quantized = QuantDequant_STE.apply(signal_reshaped, self.config.dac_bits)
         kernel_quantized = QuantDequant_STE.apply(kernel_reshaped, self.config.dac_bits)
@@ -906,6 +923,52 @@ class JTC(nn.Module):
         # Step 10: Index selection
         indices = self.compute_correlation_indices(output_plane.device)
         output = output_plane[..., indices]
+
+        return output
+
+    def forward(self, signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        """Joint Transform Correlator forward pass.
+
+        Pipeline:
+        1. DAC quantization (dac_bits)
+        2. Input distortion (driver + MRM)
+        3. FFT to Fourier plane
+        4. Output distortion (loss + PD + TIA + scale)
+        5. Fourier plane quantization (fourier_plane_bits)
+        6. Input distortion (driver + MRM)
+        7. FFT to detector plane
+        8. Output distortion (loss + PD + TIA + scale)
+        9. ADC quantization (adc_bits)
+        10. Index selection
+
+        Args:
+            signal: Input signal tensor (B, H, 1, W)
+            kernel: Kernel weights tensor (Cout, W)
+
+        Returns:
+            Correlation output tensor (B, H, Cout, W)
+        """
+        # Reshape inputs for batch processing
+        signal_full = signal.repeat(1, 1, kernel.shape[0], 1)
+        kernel_full = kernel.repeat(signal.shape[0], signal.shape[1], 1, 1)
+        batch_size_for_jtc = (
+            signal_full.shape[0] * signal_full.shape[1] * signal_full.shape[2]
+        )
+        signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.input_length)
+        kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.kernel_length)
+
+        # Optionally use gradient checkpointing
+        use_checkpoint = getattr(self.config, 'checkpoint_jtc', False) and self.training
+        if use_checkpoint:
+            import torch.utils.checkpoint as checkpoint
+            output = checkpoint.checkpoint(
+                self._forward_impl,
+                signal_reshaped,
+                kernel_reshaped,
+                use_reentrant=False
+            )
+        else:
+            output = self._forward_impl(signal_reshaped, kernel_reshaped)
 
         # Reshape output
         output_reshaped = output.reshape(

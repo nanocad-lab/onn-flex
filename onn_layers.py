@@ -518,7 +518,8 @@ class FTconvlayer(_ConvNd):
         output_n = self.conv_forward(x, weight_n)
         return output_p - output_n
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
+        """Internal forward implementation for gradient checkpointing."""
         if self.hv_concat:
             conv_h = self.pseudo_forward(x, self.weights)
             conv_v = self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
@@ -531,6 +532,19 @@ class FTconvlayer(_ConvNd):
                 0, 1, 3, 2
             )
         return self.pseudo_forward(x, self.weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        # Optionally use gradient checkpointing
+        use_checkpoint = getattr(self.config, 'checkpoint_layers', False) and self.training
+        if use_checkpoint:
+            import torch.utils.checkpoint as checkpoint
+            return checkpoint.checkpoint(
+                self._forward_impl,
+                x,
+                use_reentrant=False
+            )
+        else:
+            return self._forward_impl(x)
 
 
 def _uniform_quantize(x, bits: int, s: float = 1.0, signed: bool = False):

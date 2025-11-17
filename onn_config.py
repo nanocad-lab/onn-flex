@@ -85,6 +85,18 @@ class AppConfig:
     # Whether to normalize activations after each identical block
     normalize_blocks: bool = False
 
+    # ------------------------------------------------------------------
+    #  Memory optimization parameters
+    # ------------------------------------------------------------------
+    # Transfer function simplification
+    simplify_transfer_functions: bool = True  # Enable algebraic simplification
+    tf_simplification_max_error: float = 1e-4  # Max RMSE for order reduction
+
+    # Gradient checkpointing
+    use_gradient_checkpointing: bool = False  # Enable activation checkpointing
+    checkpoint_jtc: bool = False  # Checkpoint JTC forward pass
+    checkpoint_layers: bool = False  # Checkpoint FTconvlayer forward pass
+
     def __post_init__(self):
         """Validate configuration parameters."""
         valid_backends = ['pytorch', 'fourier', 'jtc_emulation']
