@@ -12,6 +12,9 @@ class AppConfig:
 
     # These values will be overridable from CLI or YAML
     output_dir: str = "./output"
+    dataset: str = "cifar10"
+    input_channels: int = 3
+    auto_infer_input_channels: bool = True
 
     # JTC parameters
     input_length: int = 8  # length of input signal
@@ -95,3 +98,10 @@ class AppConfig:
                 f"Invalid conv_backend '{self.conv_backend}'. "
                 f"Must be one of {valid_backends}"
             )
+        valid_datasets = ['cifar10', 'mnist']
+        if self.dataset.lower() not in valid_datasets:
+            raise ValueError(
+                f"Invalid dataset '{self.dataset}'. Must be one of {valid_datasets}"
+            )
+        if self.input_channels <= 0:
+            raise ValueError("input_channels must be positive")

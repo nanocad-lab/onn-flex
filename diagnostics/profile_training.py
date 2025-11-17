@@ -34,7 +34,7 @@ def profile_training() -> None:
     config.run_pretrain_tests = False
 
     # Get data
-    trainloader, _ = get_data_loaders(config.batch_size)
+    trainloader, _ = get_data_loaders(config)
     model = build_model(config).to(device)
 
     # Profiler setup

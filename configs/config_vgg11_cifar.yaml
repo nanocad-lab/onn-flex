@@ -1,6 +1,6 @@
-model_name: vgg16
-config_file: config_vgg16.yaml
-output_dir: ./output_vgg16
+model_name: vgg11
+config_file: config_vgg11_cifar.yaml
+output_dir: ./output_vgg11_cifar
 dataset: cifar10
 input_channels: 3
 auto_infer_input_channels: true
@@ -13,7 +13,7 @@ auto_plan_jtc_lengths: true
 jtc_separation: 8
 jtc_total_field: 64
 
-conv_backend: fourier
+conv_backend: pytorch
 scale_output: "none"
 dac_bits: 4
 adc_bits: 6
@@ -43,5 +43,5 @@ learning_rate: 0.001
 batch_size: 128
 eval_only: False
 pretrained_weights: ""
-run_pretrain_tests: True
+run_pretrain_tests: False
 loss: 0.96

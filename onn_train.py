@@ -31,51 +31,72 @@ DISTORTION_STRENGTH_FIELDS = [
 
 
 def get_data_loaders(
-    batch_size: int,
+    config: AppConfig,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-    """Create CIFAR-10 train / test dataloaders with the same augmentation
-    pipeline used in the original template."""
-    # stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    """Create dataset-specific train/test loaders."""
+    dataset = config.dataset.lower()
+    batch_size = config.batch_size
 
-    train_transform = transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
-            transforms.ToTensor(),
-            # transforms.Normalize(*stats, inplace=True),
-        ]
-    )
-    test_transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            # transforms.Normalize(*stats),
-        ]
-    )
+    if dataset == "mnist":
+        train_transform = transforms.Compose(
+            [
+                transforms.Pad(2),
+                transforms.RandomRotation(10, fill=0),
+                transforms.ToTensor(),
+            ]
+        )
+        test_transform = transforms.Compose(
+            [
+                transforms.Pad(2),
+                transforms.ToTensor(),
+            ]
+        )
+        trainset = torchvision.datasets.MNIST(
+            root="./data", train=True, download=True, transform=train_transform
+        )
+        testset = torchvision.datasets.MNIST(
+            root="./data", train=False, download=True, transform=test_transform
+        )
+        if config.auto_infer_input_channels:
+            config.input_channels = 1
+    else:
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
+                transforms.ToTensor(),
+            ]
+        )
+        test_transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+            ]
+        )
+        trainset = torchvision.datasets.CIFAR10(
+            root="./data", train=True, download=True, transform=train_transform
+        )
+        testset = torchvision.datasets.CIFAR10(
+            root="./data", train=False, download=True, transform=test_transform
+        )
+        if config.auto_infer_input_channels:
+            config.input_channels = 3
 
-    trainset = torchvision.datasets.CIFAR10(
-        root="./data", train=True, download=True, transform=train_transform
-    )
-    testset = torchvision.datasets.CIFAR10(
-        root="./data", train=False, download=True, transform=test_transform
-    )
-
-    trainloader = torch.utils.data.DataLoader(
-        trainset,
+    common_loader_kwargs = dict(
         batch_size=batch_size,
-        shuffle=True,
         num_workers=8,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
+    )
+    trainloader = torch.utils.data.DataLoader(
+        trainset,
+        shuffle=True,
+        **common_loader_kwargs,
     )
     testloader = torch.utils.data.DataLoader(
         testset,
-        batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2,
+        **common_loader_kwargs,
     )
     return trainloader, testloader
 
@@ -178,7 +199,7 @@ def train_onn_model(config: AppConfig) -> float:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Build dataset loaders
-    trainloader, testloader = get_data_loaders(config.batch_size)
+    trainloader, testloader = get_data_loaders(config)
 
     # Build model
     model = build_model(config).to(device)

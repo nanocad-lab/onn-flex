@@ -77,6 +77,33 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Output directory for saving config",
     )
     parser.add_argument(
+        "--dataset",
+        type=str,
+        default=yaml_config.dataset,
+        choices=["cifar10", "mnist"],
+        help="Dataset to use for training and evaluation",
+    )
+    parser.add_argument(
+        "--input-channels",
+        dest="input_channels",
+        type=int,
+        default=None,
+        help="Number of input channels (auto-set when dataset changes)",
+    )
+    parser.add_argument(
+        "--auto-input-channels",
+        dest="auto_infer_input_channels",
+        action="store_true",
+        help="Automatically infer input channel count based on dataset",
+    )
+    parser.add_argument(
+        "--no-auto-input-channels",
+        dest="auto_infer_input_channels",
+        action="store_false",
+        help="Disable automatic input channel inference",
+    )
+    parser.set_defaults(auto_infer_input_channels=yaml_config.auto_infer_input_channels)
+    parser.add_argument(
         "--model-name",
         dest="model_name",
         type=str,
@@ -394,6 +421,12 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
     )
 
     args = parser.parse_args()
+    if args.input_channels is None:
+        args.input_channels = yaml_config.input_channels
+    if args.auto_infer_input_channels:
+        default_channels = AppConfig().input_channels
+        if args.dataset.lower() == "mnist" and args.input_channels == default_channels:
+            args.input_channels = 1
 
     return AppConfig(**vars(args))
 

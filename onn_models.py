@@ -124,8 +124,9 @@ class FFTConvNet(nn.Module):
         self.config = config
 
         # Stem
+        in_ch = max(1, getattr(config, "input_channels", 3))
         self.conv1 = FTconvlayer(
-            3,
+            in_ch,
             8,
             config=config,
             kernel_size=config.input_length,
@@ -258,7 +259,7 @@ VGG_CONFIGS: Dict[str, List[int | str]] = {
 
 def _make_vgg_layers(config: AppConfig, cfg: Sequence[int | str]) -> Tuple[nn.Sequential, int]:
     layers: List[nn.Module] = []
-    in_channels = 3
+    in_channels = max(1, getattr(config, "input_channels", 3))
     last_channels = in_channels
 
     for v in cfg:
