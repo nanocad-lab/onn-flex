@@ -1,0 +1,21 @@
+# Recommended VGG-on-JTC configuration for a 64-pixel lens
+# Cycle planner best result: input_length=17, kernel_length=3, separation=14 (passes=2, cycles=180)
+model: vgg11
+conv_backend: jtc_emulation
+
+# JTC geometry derived from the cycle planner sweep (lens size 64)
+jtc_half_size: 32
+jtc_total_field: 64
+jtc_separation: 14
+
+# Input/weight padding (max across the whole model)
+input_length: 17
+weight_length: 3
+
+# Training hyperparameters
+num_epochs: 50
+batch_size: 128
+learning_rate: 0.001
+run_pretrain_tests: false
+pretrain_tests_only: false
+output_dir: ./output_vgg11_jtc
