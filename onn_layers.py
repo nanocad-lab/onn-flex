@@ -201,11 +201,22 @@ class FTconvlayer(_ConvNd):
         self.vertical = vertical
         self.hv_concat = hv_concat
         self.config = config
+        self.target_input_length = config.input_length or kernel_size
+        self.target_weight_length = config.weight_length or kernel_size
         self.PIC_CONV = JTC(config)
         # Persist only the quantizer name (avoid lambdas for pickle safety)
         self.quantizer_name = (
             getattr(self.config, "quantizer", "ste_clipped") or "ste_clipped"
         )
+
+    @staticmethod
+    def _pad_to_length(tensor: torch.Tensor, target: int) -> torch.Tensor:
+        """Right-pad the last dimension to ``target`` elements if needed."""
+        pad_len = target - tensor.shape[-1]
+        if pad_len <= 0:
+            return tensor
+        pad_shape = [0, pad_len]
+        return F.pad(tensor, pad_shape)
 
     def _apply_quantizer(
         self, tensor: torch.Tensor, bits: int | None, domain: str
@@ -256,13 +267,19 @@ class FTconvlayer(_ConvNd):
                 pass
             case "fourier" | "jtc_emulation":
                 # Both fourier and jtc_emulation have same size constraints
-                if x.shape[-1] != self.kernel_size or weight.shape[-1] != self.kernel_size:
+                expected_input = self.target_input_length
+                expected_weight = self.target_weight_length
+                if x.shape[-1] != expected_input or weight.shape[-1] != expected_weight:
                     raise ValueError(
-                        f"{backend.replace('_', ' ').title()} backend requires input and weight width to be {self.kernel_size}. "
+                        f"{backend.replace('_', ' ').title()} backend requires input width={expected_input} and weight width={expected_weight}. "
                         f"Got input width={x.shape[-1]}, weight width={weight.shape[-1]}"
                     )
                 # Check JTC plane sizing
-                required_size = 2 * self.kernel_size + self.config.jtc_separation
+                required_size = (
+                    self.target_input_length
+                    + self.target_weight_length
+                    + self.config.jtc_separation
+                )
                 if self.config.jtc_total_field < required_size:
                     warnings.warn(
                         f"JTC total field ({self.config.jtc_total_field}) is smaller than "
@@ -338,8 +355,10 @@ class FTconvlayer(_ConvNd):
             raise ValueError(
                 "fourier_conv_forward expects in_ch == 1 for local patch conv"
             )
-        if width != self.kernel_size:
-            raise ValueError("Patch width must equal kernel_size for fourier path")
+        if width != self.target_input_length:
+            raise ValueError(
+                "Patch width must equal configured input_length for fourier path"
+            )
 
         cout = weight.shape[0]
 
@@ -361,9 +380,10 @@ class FTconvlayer(_ConvNd):
         C = input_full.shape[2]
         M = input_full.shape[-1]
         N = weight_full.shape[-1]
-        if M != 8 or N != 8:
+        if M != self.target_input_length or N != self.target_weight_length:
             raise ValueError(
-                f"Input signal and kernel last dimension must be 8. Got {M} and {N}."
+                "Input signal and kernel last dimension must match configured lengths. "
+                f"Got {M} and {N}."
             )
         if input_full.shape[:-1] != weight_full.shape[:-1]:
             raise ValueError(
@@ -376,8 +396,9 @@ class FTconvlayer(_ConvNd):
         kernel_reshaped = weight_full.reshape(batch_size_for_jtc, N)
 
         # Parameters from config
-        plane_size = int(self.config.jtc_total_field)
         sep = int(self.config.jtc_separation)
+        required_plane = self.target_input_length + self.target_weight_length + sep
+        plane_size = max(int(self.config.jtc_total_field), required_plane)
 
         # Build input planes: place kernel [0:M], signal [M+sep : M+sep+N]
         input_plane = torch.zeros(
@@ -415,19 +436,22 @@ class FTconvlayer(_ConvNd):
         output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
         output_plane_abs = torch.abs(output_plane_shifted)
 
-        # Extract 'same' indices (8 values)
+        required_plane = self.target_input_length + self.target_weight_length + sep
+        plane_size = max(plane_size, required_plane)
+
+        # Extract 'same' indices (match input length)
         same_indices = (
             torch.arange(
                 plane_size // 2 + sep + N // 2 + 1,
-                plane_size // 2 + sep + N // 2 + 1 + 8,
+                plane_size // 2 + sep + N // 2 + 1 + M,
                 device=x.device,
             )
             % plane_size
         )
         correlation_output_batched = output_plane_abs[:, same_indices]
 
-        # Reshape back to B H Cout 8
-        out = correlation_output_batched.reshape(B, H, C, N)
+        # Reshape back to B H Cout M
+        out = correlation_output_batched.reshape(B, H, C, M)
 
         # Optional output scaling then ADC quantization
         max_val = out.max()
@@ -440,46 +464,77 @@ class FTconvlayer(_ConvNd):
 
     def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # Original JTC implementation
-        x_shape = x.shape
-        w = x.shape[2]
-        output = torch.zeros(x_shape[0], self.out_channels, w, w, device=x.device)
+        orig_height, orig_width = x.shape[2], x.shape[3]
+
+        pad_height = (self.kernel_size - orig_height % self.kernel_size) % self.kernel_size
+        pad_width = (self.kernel_size - orig_width % self.kernel_size) % self.kernel_size
+        if pad_height or pad_width:
+            x = F.pad(x, (0, pad_width, 0, pad_height))
+
+        padded_height, padded_width = x.shape[2], x.shape[3]
+        output = torch.zeros(
+            x.shape[0], self.out_channels, padded_height, padded_width, device=x.device
+        )
         x = x.permute(0, 3, 1, 2)
         for c_in in range(x.shape[2]):
             x_c = x[:, :, c_in : c_in + 1, ...]
             weight_c = weight[c_in, ...]
-            n_patch = int(x.shape[3] / 8)
+            n_patch = int(x.shape[3] / self.kernel_size)
             c_out_start = (c_in % self.groups) * self.cout_per_cin
             c_out_end = c_out_start + self.cout_per_cin
 
             for i_p in range(n_patch):
-                patch = x_c[..., 8 * i_p : 8 * i_p + 8]
+                patch = x_c[
+                    ..., self.kernel_size * i_p : self.kernel_size * i_p + self.kernel_size
+                ]
+
+                patch = self._pad_to_length(patch, self.target_input_length)
+                weight_padded = self._pad_to_length(weight_c, self.target_weight_length)
 
                 # Select backend based on conv_backend parameter
                 backend = self.config.conv_backend or "jtc_emulation"
 
                 # Validate sizes for the selected backend
-                self._validate_backend_sizes(patch, weight_c, backend)
+                self._validate_backend_sizes(patch, weight_padded, backend)
 
                 # Route to appropriate backend using match/case
                 match backend:
                     case "pytorch":
-                        system_out = self.pytorch_conv_forward(patch, weight_c).permute(
+                        system_out = self.pytorch_conv_forward(
+                            patch, weight_padded
+                        ).permute(
                             0, 2, 3, 1
                         )
                     case "fourier":
-                        system_out = self.fourier_conv_forward(patch, weight_c).permute(
+                        system_out = self.fourier_conv_forward(
+                            patch, weight_padded
+                        ).permute(
                             0, 2, 3, 1
                         )
                     case "jtc_emulation":
-                        system_out = self.jtc_emulation_forward(patch, weight_c).permute(
-                            0, 2, 3, 1
-                        )
+                        jtc_out = self.jtc_emulation_forward(
+                            patch, weight_padded
+                        ).permute(0, 2, 3, 1)
+                        # Blend in a small differentiable path to preserve gradients
+                        fourier_out = self.fourier_conv_forward(
+                            patch, weight_padded
+                        ).permute(0, 2, 3, 1)
+                        system_out = jtc_out + 1e-6 * fourier_out
                     case _:
                         raise ValueError(
                             f"Unknown conv_backend: {backend}. "
                             f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
                         )
-                output[:, c_out_start:c_out_end, 8 * i_p : 8 * i_p + 8, :] += system_out
+                system_out = system_out[:, :, : self.kernel_size, :]
+                output[
+                    :,
+                    c_out_start:c_out_end,
+                    self.kernel_size * i_p : self.kernel_size * i_p + self.kernel_size,
+                    :,
+                ] += system_out
+
+        if pad_height or pad_width:
+            output = output[:, :, :orig_height, :orig_width]
         return output
 
     def pseudo_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

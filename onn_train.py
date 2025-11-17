@@ -86,6 +86,55 @@ def get_data_loaders(
 # -------------------------------
 
 
+VGG_CONFIGS: dict[str, list[int | str]] = {
+    "vgg11": [64, "M", 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
+    "vgg13": [64, 64, "M", 128, 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
+    "vgg16": [
+        64,
+        64,
+        "M",
+        128,
+        128,
+        "M",
+        256,
+        256,
+        256,
+        "M",
+        512,
+        512,
+        512,
+        "M",
+        512,
+        512,
+        512,
+        "M",
+    ],
+    "vgg19": [
+        64,
+        64,
+        "M",
+        128,
+        128,
+        "M",
+        256,
+        256,
+        256,
+        256,
+        "M",
+        512,
+        512,
+        512,
+        512,
+        "M",
+        512,
+        512,
+        512,
+        512,
+        "M",
+    ],
+}
+
+
 class FFTConvNet(nn.Module):
     """Configurable variant of the 7-layer FFTConv network from `old_template.py`.
 
@@ -164,6 +213,64 @@ class FFTConvNet(nn.Module):
         return x
 
 
+def _make_vgg_layers(config: AppConfig, cfg: list[int | str]) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    in_channels = 3
+    kernel_size = config.weight_length or 3
+    for v in cfg:
+        if v == "M":
+            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+        else:
+            layers.append(
+                FTconvlayer(
+                    in_channels,
+                    int(v),
+                    config=config,
+                    kernel_size=kernel_size,
+                    hv_concat=False,
+                )
+            )
+            layers.append(nn.BatchNorm2d(int(v)))
+            layers.append(nn.ReLU(inplace=True))
+            in_channels = int(v)
+    return nn.Sequential(*layers)
+
+
+class VGG(nn.Module):
+    def __init__(self, config: AppConfig, variant: str = "vgg11"):
+        super().__init__()
+        if variant not in VGG_CONFIGS:
+            raise ValueError(f"Unknown VGG variant '{variant}'")
+
+        self.features = _make_vgg_layers(config, VGG_CONFIGS[variant])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.ReLU(True),
+            nn.Dropout(p=0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(True),
+            nn.Dropout(p=0.5),
+            nn.Linear(512, 10),
+        )
+
+    # pylint: disable=arguments-differ
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        return self.classifier(x)
+
+
+def build_model(config: AppConfig) -> nn.Module:
+    model_name = getattr(config, "model", "fftconv").lower()
+    if model_name == "fftconv":
+        return FFTConvNet(config)
+    if model_name in VGG_CONFIGS:
+        return VGG(config, variant=model_name)
+    raise ValueError(f"Unknown model '{model_name}'")
+
+
 # -------------------------------
 #  Training / evaluation helpers
 # -------------------------------
@@ -203,7 +310,7 @@ def run_full_strength_inference(
     for field in DISTORTION_STRENGTH_FIELDS:
         setattr(distortion_config, field, 1.0)
 
-    ref_model = FFTConvNet(distortion_config).to(device)
+    ref_model = build_model(distortion_config).to(device)
     ref_model.load_state_dict(model.state_dict())
 
     try:
@@ -265,7 +372,7 @@ def train_onn_model(config: AppConfig) -> float:
     trainloader, testloader = get_data_loaders(config.batch_size)
 
     # Build model
-    model = FFTConvNet(config).to(device)
+    model = build_model(config).to(device)
 
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:

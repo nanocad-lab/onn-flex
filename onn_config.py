@@ -24,30 +24,37 @@ class AppConfig:
 
     # Driver parameters
     driver_distortion_strength: float = 0.0
-    driver_distortion_data_path: str = "./data/driver_distortion_data.csv"
+    driver_distortion_data_path: str = "./component_data/driver_sim_data.csv"
     driver_distortion_polyfit_order: Optional[int] = None
 
     # PD/TIA parameters
     pd_tia_distortion_strength: float = 0.0
-    pd_tia_distortion_data_path: str = "./data/pd_tia_distortion_data.csv"
+    pd_tia_distortion_data_path: str = "./component_data/pd_tia_sim_data.csv"
     pd_tia_distortion_polyfit_order: Optional[int] = None
 
-    pd_distortion_data_path: str = "./data/pd_distortion_data.csv"
+    pd_distortion_data_path: str = "./component_data/pd_sim_data.csv"
     pd_distortion_polyfit_order: Optional[int] = None
     pd_distortion_strength: float = 0.0
 
-    tia_distortion_data_path: str = "./data/tia_distortion_data.csv"
+    tia_distortion_data_path: str = "./component_data/tia_sim_data.csv"
     tia_distortion_polyfit_order: Optional[int] = None
     tia_distortion_strength: float = 0.0
 
+    # Input/weight length configuration (max across the model)
+    input_length: int | None = None
+    weight_length: int | None = None
+
+    # Model selection
+    model: str = "fftconv"
+
     # MRM power parameters
     mrm_power_distortion_strength: float = 0.0
-    mrm_power_data_path: str = "./data/mrm_power_data.csv"
+    mrm_power_data_path: str = "./component_data/mrm_pwr_gain_sim_data.csv"
     mrm_power_polyfit_order: Optional[int] = None
 
     # MRM phase parameters
     mrm_phase_distortion_strength: float = 0.0
-    mrm_phase_data_path: str = "./data/mrm_phase_data.csv"
+    mrm_phase_data_path: str = "./component_data/mrm_phase_sim_data.csv"
     mrm_phase_polyfit_order: Optional[int] = None
 
     # LER process variation
