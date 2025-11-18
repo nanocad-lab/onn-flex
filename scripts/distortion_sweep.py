@@ -262,14 +262,23 @@ def _sweep_param(
 # -----------------------------------------------------------------------------
 
 
+def _infer_patch_length(cfg: AppConfig) -> int:
+    """Return the effective 1-D patch length for random signal generation."""
+    return int(getattr(cfg, "input_length", getattr(cfg, "kernel_length", 8)))
+
+
+def _infer_kernel_length(cfg: AppConfig) -> int:
+    return int(getattr(cfg, "kernel_length", getattr(cfg, "input_length", 8)))
+
+
 def _compute_jtc_sndrs(cfg: AppConfig, num_tests: int = 1000, seed: int = 0):
     """Compute SNDR between two JTC *forward* outputs.
 
     The comparison is between:
       • The **current** configuration (*cfg*).
       • A **reference** configuration with the same parameters except
-        ``jtc_separation = cfg.jtc_half_size`` and
-        ``jtc_total_field = 6 * cfg.jtc_half_size``.
+        ``jtc_separation = cfg.input_length`` and
+        ``jtc_total_field = 6 * cfg.input_length``.
 
     Distortion-strength parameters are **not** zeroed – the goal is to
     isolate the effect of geometry (separation / total-field).
@@ -287,10 +296,13 @@ def _compute_jtc_sndrs(cfg: AppConfig, num_tests: int = 1000, seed: int = 0):
     jtc_cur = _build_jtc(cfg).to(device)
 
     # Reference geometry (same distortion settings)
+    patch_len = _infer_patch_length(cfg)
+    kernel_len = _infer_kernel_length(cfg)
+
     ref_cfg = replace(
         cfg,
-        jtc_separation=cfg.jtc_half_size,
-        jtc_total_field=cfg.jtc_half_size * 6,
+        jtc_separation=patch_len,
+        jtc_total_field=patch_len * 6,
     )
     jtc_ref = _build_jtc(ref_cfg).to(device)
 
@@ -298,8 +310,8 @@ def _compute_jtc_sndrs(cfg: AppConfig, num_tests: int = 1000, seed: int = 0):
     ref_list = []
 
     for _ in range(num_tests):
-        signal = torch.rand(1, 1, 1, cfg.jtc_half_size, device=device)
-        kernel = torch.rand(1, cfg.jtc_half_size, device=device)
+        signal = torch.rand(1, 1, 1, patch_len, device=device)
+        kernel = torch.rand(1, kernel_len, device=device)
 
         out_list.append(jtc_cur(signal, kernel))
         ref_list.append(jtc_ref(signal, kernel))
@@ -323,9 +335,10 @@ def _sweep_jtc_2d(base_cfg: AppConfig, weights: str, out_dir: str) -> None:
     """
 
     # Define sweep ranges (feel free to adjust as needed)
-    sep_values = np.arange(0, base_cfg.jtc_half_size + 1 + 4)  # 0 … 8 for default cfg
+    patch_len = _infer_patch_length(base_cfg)
+    sep_values = np.arange(0, patch_len + 1 + 4)  # 0 … 8 for default cfg
     # Ensure the smallest field is the minimal valid value
-    min_field = 2 * base_cfg.jtc_half_size
+    min_field = 2 * patch_len
     field_values = np.arange(min_field, min_field + 41, 4)  # 16,20,24,28,32
 
     acc_matrix = np.full((len(sep_values), len(field_values)), np.nan)

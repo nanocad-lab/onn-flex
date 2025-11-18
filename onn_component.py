@@ -435,7 +435,8 @@ class JTC(nn.Module):
             sep: Separation between kernel and signal
 
         Returns:
-            Number of clean valid outputs for stitching (effective stride)
+            Total number of correlation outputs (M+N-1) if configuration is valid,
+            otherwise 0.
         """
         # Validity checks
         if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
@@ -450,13 +451,7 @@ class JTC(nn.Module):
         if input_len + kernel_len + sep > lens_size:
             return 0
 
-        # Use contamination-aware cycle planner
-        # Returns: (total_outputs, clean_valid_outputs, effective_stride)
-        _, clean_valid, effective_stride = compute_contamination_profile(
-            input_len, kernel_len, lens_size, sep
-        )
-
-        return effective_stride
+        return input_len + kernel_len - 1
 
     def __init__(self, config: AppConfig):
         super(JTC, self).__init__()
@@ -560,9 +555,8 @@ class JTC(nn.Module):
         return x
 
     def fft_and_magnitude(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply FFT, fftshift, and take magnitude."""
+        """Apply FFT and take magnitude without reallocating via fftshift."""
         x = torch.fft.fft(x)
-        x = torch.fft.fftshift(x)  # DC in center for optical lens
         return torch.abs(x)
 
     def compute_correlation_indices(self, device) -> torch.Tensor:
@@ -576,8 +570,8 @@ class JTC(nn.Module):
         sep = self.jtc_separation
         N = self.kernel_length
 
-        # Extraction formula for correlation output indices
-        same_start = plane_size // 2 + sep + N // 2
+        # Extraction formula for correlation output indices (no fftshift)
+        same_start = (sep + N // 2) % plane_size
         indices = torch.arange(
             same_start,
             same_start + self.output_length,
@@ -644,14 +638,8 @@ class JTC(nn.Module):
         return self.build_input_plane(signal_distorted, kernel_distorted)
 
     def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
-        """Perform FFT and shift the result.
-
-        DEPRECATED: This method is kept for backward compatibility.
-        Use fft_and_magnitude() or inline torch.fft operations instead.
-        """
-        jft = torch.fft.fft(input_plane)
-        jft = torch.fft.fftshift(jft)
-        return jft
+        """Perform FFT (legacy helper without fftshift)."""
+        return torch.fft.fft(input_plane)
 
     def post_output_distortion(self, jft: torch.Tensor) -> torch.Tensor:
         """Apply output distortion after the Fourier plane.
@@ -757,9 +745,8 @@ class JTC(nn.Module):
         # For propagation, reuse the complex input plane computed above
         input_plane_full = plane_mrm
 
-        # Fourier plane (FFT + fftshift)
+        # Fourier plane (FFT magnitude)
         jft = torch.fft.fft(input_plane_full)
-        jft = torch.fft.fftshift(jft)
         if "jps_raw" in stages:
             results["jps_raw"] = torch.abs(jft)[0, :].detach()
 
@@ -807,7 +794,6 @@ class JTC(nn.Module):
 
         # Back to detector plane
         output_plane = torch.fft.fft(jps_complex)
-        output_plane = torch.fft.fftshift(output_plane)
         output_raw = torch.abs(output_plane) * self.loss
         if "output_raw" in stages:
             results["output_raw"] = output_raw[0, :].detach()

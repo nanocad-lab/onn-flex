@@ -1,0 +1,44 @@
+model_name: vgg11
+config_file: config_vgg11_mnist.yaml
+output_dir: ./output_vgg11_mnist
+dataset: mnist
+input_channels: 1
+auto_infer_input_channels: true
+
+input_length: 32
+kernel_length: 8
+auto_plan_jtc_lengths: true
+
+jtc_separation: 8
+jtc_total_field: 64
+
+conv_backend: pytorch
+scale_output: "none"
+dac_bits: 4
+adc_bits: 6
+fourier_plane_bits: 6
+quantizer: ste_clipped
+
+driver_distortion_data_path: ./component_data/driver_sim_data.csv
+pd_tia_distortion_data_path: ./component_data/pd_tia_sim_data.csv
+pd_distortion_data_path: ./component_data/pd_sim_data.csv
+tia_distortion_data_path: ./component_data/tia_sim_data.csv
+mrm_phase_data_path: ./component_data/mrm_phase_sim_data.csv
+mrm_power_data_path: ./component_data/mrm_pwr_w_sim_data.csv
+
+driver_distortion_strength: 0.0
+pd_tia_distortion_strength: 0.0
+pd_distortion_strength: 0.0
+tia_distortion_strength: 0.0
+mrm_phase_distortion_strength: 0.0
+mrm_power_distortion_strength: 0.0
+ler_std_dev: 0.0
+
+num_identical_layers: 0
+num_epochs: 20
+learning_rate: 0.001
+batch_size: 256
+eval_only: False
+pretrained_weights: ""
+run_pretrain_tests: False
+loss: 0.96

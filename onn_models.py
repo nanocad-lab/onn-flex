@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 import torch
@@ -254,31 +255,49 @@ VGG_CONFIGS: Dict[str, List[int | str]] = {
         512,
         "M",
     ],
+    "vgg3": [64, "M", 128, "M", 256],
 }
 
 
-def _make_vgg_layers(config: AppConfig, cfg: Sequence[int | str]) -> Tuple[nn.Sequential, int]:
+def _make_vgg_layers(
+    config: AppConfig, cfg: Sequence[int | str], variant: str
+) -> Tuple[nn.Sequential, int]:
     layers: List[nn.Module] = []
     in_channels = max(1, getattr(config, "input_channels", 3))
     last_channels = in_channels
+    initial_width = max(1, min(getattr(config, "input_length", CIFAR_WIDTH), CIFAR_WIDTH))
+    current_width = initial_width
+    conv_idx = 0
+
+    base_input_cap = max(1, getattr(config, "input_length", CIFAR_WIDTH))
 
     for v in cfg:
         if v == "M":
             layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+            current_width = max(1, current_width // 2)
         else:
             out_channels = int(v)
+            layer_config = copy.deepcopy(config)
+            target_input = min(current_width, base_input_cap)
+            target_input = max(3, target_input)
+            layer_config.input_length = target_input
+            if layer_config.kernel_length > target_input:
+                layer_config.kernel_length = target_input
+            layer_config.output_length = None
+            _maybe_plan_jtc_lengths(layer_config, f"{variant}_layer{conv_idx}")
             layers.append(
                 FTconvlayer(
                     in_channels,
                     out_channels,
-                    config=config,
-                    kernel_size=config.input_length,
+                    config=layer_config,
+                    kernel_size=layer_config.input_length,
                     hv_concat=False,
                 )
             )
             layers.append(nn.ReLU(inplace=True))
             in_channels = out_channels
             last_channels = out_channels
+            conv_idx += 1
 
     return nn.Sequential(*layers), last_channels
 
@@ -292,7 +311,7 @@ class VGG(nn.Module):
             raise ValueError(f"Unsupported VGG variant '{variant}'")
         self.config = config
 
-        layers, last_channels = _make_vgg_layers(config, VGG_CONFIGS[variant])
+        layers, last_channels = _make_vgg_layers(config, VGG_CONFIGS[variant], variant)
         self.features = layers
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
@@ -316,6 +335,7 @@ MODEL_REGISTRY: Dict[str, Callable[[AppConfig], nn.Module]] = {
     "vgg13": lambda cfg: VGG(cfg, "vgg13"),
     "vgg16": lambda cfg: VGG(cfg, "vgg16"),
     "vgg19": lambda cfg: VGG(cfg, "vgg19"),
+    "vgg3": lambda cfg: VGG(cfg, "vgg3"),
 }
 
 
@@ -329,5 +349,6 @@ def build_model(config: AppConfig) -> nn.Module:
             f"Available models: {', '.join(sorted(MODEL_REGISTRY))}"
         )
 
-    _maybe_plan_jtc_lengths(config, model_name)
+    if not model_name.startswith("vgg"):
+        _maybe_plan_jtc_lengths(config, model_name)
     return builder(config)

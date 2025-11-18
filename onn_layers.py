@@ -410,11 +410,10 @@ class FTconvlayer(_ConvNd):
         roll_amount = (plane_size // 2) - (M + signal_start) // 2
         input_plane = torch.roll(input_plane, shifts=roll_amount, dims=-1)
 
-        # JTC physics: FFT -> fftshift -> Joint Power Spectrum (JPS)
+        # JTC physics: FFT -> Joint Power Spectrum (JPS)
         jft = torch.fft.fft(input_plane, dim=-1)
-        jft_shifted = torch.fft.fftshift(jft, dim=-1)
-        jps = torch.abs(jft_shifted) ** 2
-        jps = jps / plane_size
+        jft_components = torch.view_as_real(jft)
+        jps = (jft_components**2).sum(dim=-1) / plane_size
 
         # Quantize at JPS if enabled (Fourier plane quantization)
         if self.config.fourier_plane_bits is not None:
@@ -422,19 +421,17 @@ class FTconvlayer(_ConvNd):
                 jps, self.config.fourier_plane_bits, domain="fourier"
             )
 
-        # Back to output plane: FFT -> fftshift -> magnitude
+        # Back to output plane: FFT -> magnitude
         # Output is magnitude (light intensity), always positive
         output_plane_fft = torch.fft.fft(jps, dim=-1)
-        output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
         if preserve_phase:
-            correlation_plane = output_plane_shifted.real
+            correlation_plane = output_plane_fft.real
         else:
-            correlation_plane = torch.abs(output_plane_shifted)
+            correlation_plane = torch.abs(output_plane_fft)
 
         # Extract correlation output
-        # Formula: same_start = plane_size//2 + sep + N//2
-        # Note: Original formula had +1, but empirical analysis shows it should be removed
-        same_start = plane_size // 2 + sep + N // 2
+        # Formula remapped for unshifted FFT domain: start at sep + N//2
+        same_start = (sep + N // 2) % plane_size
 
         # Extract full correlation (M+N-1 outputs) if config allows
         # For properly sized planes with adequate separation, full correlation is overlap-free
@@ -468,7 +465,7 @@ class FTconvlayer(_ConvNd):
     def _run_backend_patch(
         self, patch: torch.Tensor, weight: torch.Tensor, backend: str
     ) -> torch.Tensor:
-        """Run the configured backend on a 1-D patch and return [B, Cout, L]."""
+        """Run the configured backend on a 1-D patch and return [B, H, Cout, L]."""
         self._validate_backend_sizes(patch, weight, backend)
 
         match backend:
@@ -484,13 +481,9 @@ class FTconvlayer(_ConvNd):
                     f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
                 )
 
-        # Output shape: [B, H=1, Cout, L] → squeeze height dimension
-        return out[:, 0, :, :]
+        return out
 
-    def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        """Perform row-wise stitched convolution with contamination-aware stride."""
-        backend = self.config.conv_backend or "jtc_emulation"
-
+    def _conv_forward_single(self, x: torch.Tensor, weight: torch.Tensor, backend: str) -> torch.Tensor:
         batch_size, in_channels, height, width = x.shape
         patch_len = int(self.config.input_length)
         kernel_len = int(self.config.kernel_length)
@@ -518,63 +511,79 @@ class FTconvlayer(_ConvNd):
         x_padded = F.pad(x, (pad_left, pad_right, 0, 0))
         out_width = width
 
+        local_cout_per_cin = weight.shape[1]
+        total_cout = local_cout_per_cin * self.groups
         output = torch.zeros(
-            batch_size, self.out_channels, height, out_width, device=x.device, dtype=x.dtype
+            batch_size, total_cout, height, out_width, device=x.device, dtype=x.dtype
         )
+
+        valid_span = max(0, min(stride, total_outputs - valid_start))
+        if valid_span == 0:
+            return output
 
         for c_in in range(in_channels):
             channel_data = x_padded[:, c_in, :, :]  # [B, H, W_pad]
-            weight_c = weight[c_in, ...]  # [cout_per_cin, patch_len]
-            c_out_start = (c_in % self.groups) * self.cout_per_cin
-            c_out_end = c_out_start + self.cout_per_cin
+            patch_starts = torch.arange(0, out_width, stride, device=x.device)
+            num_patches = patch_starts.numel()
+            if num_patches == 0:
+                continue
+            last_start = int(patch_starts[-1].item())
+            pad_needed = max(0, last_start + patch_len - channel_data.shape[-1])
+            channel_ext = F.pad(channel_data, (0, pad_needed))
+            patches_view = channel_ext.unfold(-1, patch_len, stride)[..., :num_patches, :]
+            patches = patches_view.permute(0, 2, 1, 3).reshape(
+                batch_size * num_patches, height, 1, patch_len
+            )
 
-            for row in range(height):
-                row_data = channel_data[:, row, :]  # [B, W_pad]
-                out_col = 0
-                pass_idx = 0
+            weight_c = weight[c_in, ...]  # [local_cout_per_cin, patch_len]
+            c_out_start = (c_in % self.groups) * local_cout_per_cin
+            c_out_end = c_out_start + local_cout_per_cin
 
-                while out_col < out_width:
-                    patch_start = pass_idx * stride
-                    patch = row_data[:, patch_start : patch_start + patch_len]
-                    if patch.shape[-1] < patch_len:
-                        patch = F.pad(patch, (0, patch_len - patch.shape[-1]))
-                    patch_4d = patch.view(batch_size, 1, 1, patch_len)
+            patch_out = self._run_backend_patch(patches, weight_c, backend)
+            patch_out = patch_out.view(batch_size, num_patches, height, local_cout_per_cin, -1)
+            patch_out = patch_out.permute(0, 2, 3, 1, 4)
+            valid_slice = patch_out[:, :, :, :, valid_start : valid_start + valid_span]
 
-                    patch_out = self._run_backend_patch(patch_4d, weight_c, backend)
-                    end_idx = min(total_outputs, valid_start + stride)
-                    if end_idx <= valid_start:
-                        break
-                    valid_slice = patch_out[:, :, valid_start:end_idx]
-                    usable = min(valid_slice.shape[-1], out_width - out_col)
-                    if usable <= 0:
-                        break
-
-                    output[:, c_out_start:c_out_end, row, out_col : out_col + usable] += valid_slice[:, :, :usable]
-                    out_col += usable
-                    pass_idx += 1
+            out_slice = output[:, c_out_start:c_out_end]
+            for pass_idx in range(num_patches):
+                start_col = int(patch_starts[pass_idx].item())
+                usable = min(valid_span, out_width - start_col)
+                if usable <= 0:
+                    continue
+                end_col = min(start_col + usable, out_width)
+                slice_out = valid_slice[:, :, :, pass_idx, : usable]
+                out_slice[:, :, :, start_col:end_col] += slice_out.permute(0, 2, 1, 3)
 
         return output
 
+    def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Perform row-wise stitched convolution with contamination-aware stride."""
+        backend = self.config.conv_backend or "jtc_emulation"
+
+        if weight.dim() == 4 and weight.shape[-1] == 2:
+            stacked = torch.cat([weight[..., 0], weight[..., 1]], dim=1)
+            combined = self._conv_forward_single(x, stacked, backend)
+            half = combined.shape[1] // 2
+            return combined[:, :half, :, :] - combined[:, half:, :, :]
+
+        return self._conv_forward_single(x, weight, backend)
+
     def pseudo_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        weight_p = weight[..., 0]
-        weight_n = weight[..., 1]
-        output_p = self.conv_forward(x, weight_p)
-        output_n = self.conv_forward(x, weight_n)
-        return output_p - output_n
+        return self.conv_forward(x, weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         if self.hv_concat:
-            conv_h = self.pseudo_forward(x, self.weights)
-            conv_v = self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
+            conv_h = self.conv_forward(x, self.weights)
+            conv_v = self.conv_forward(x.permute(0, 1, 3, 2), self.weights).permute(
                 0, 1, 3, 2
             )
             conv_stacked = torch.stack([conv_h, conv_v], dim=2)
             return conv_stacked.view(conv_h.size(0), -1, conv_h.size(2), conv_h.size(3))
         if self.vertical:
-            return self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
+            return self.conv_forward(x.permute(0, 1, 3, 2), self.weights).permute(
                 0, 1, 3, 2
             )
-        return self.pseudo_forward(x, self.weights)
+        return self.conv_forward(x, self.weights)
 
 
 def _uniform_quantize(x, bits: int, s: float = 1.0, signed: bool = False):

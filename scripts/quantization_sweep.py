@@ -61,7 +61,8 @@ BACKENDS: List[str] = ["fourier", "jtc_emulation"]
 
 # Default base configuration
 DEFAULT_BASE_CONFIG = {
-    "jtc_half_size": 8,
+    "input_length": 8,
+    "kernel_length": 8,
     "jtc_separation": 8,
     "jtc_total_field": 48,
     "scale_output": "adc",
@@ -96,6 +97,18 @@ DEFAULT_BASE_CONFIG = {
 }
 
 
+def _normalize_base_config(cfg: Dict) -> Dict:
+    """Ensure legacy keys map to current AppConfig fields."""
+    normalized = cfg.copy()
+    half = normalized.pop("jtc_half_size", None)
+    if half is not None:
+        normalized.setdefault("input_length", half)
+        normalized.setdefault("kernel_length", half)
+        normalized.setdefault("jtc_separation", half)
+        normalized.setdefault("jtc_total_field", half * 6)
+    return normalized
+
+
 # -----------------------------------------------------------------------------
 #  Helper utilities
 # -----------------------------------------------------------------------------
@@ -117,6 +130,8 @@ def create_config(
     """Create an AppConfig with the specified quantization settings."""
     if base_config is None:
         base_config = DEFAULT_BASE_CONFIG.copy()
+
+    base_config = _normalize_base_config(base_config)
 
     # Override quantization and backend settings
     config_dict = base_config.copy()
@@ -192,6 +207,7 @@ def main() -> None:
         with config_path.open("r", encoding="utf-8") as fh:
             yaml_cfg = yaml.safe_load(fh)
             base_config.update(yaml_cfg)
+    base_config = _normalize_base_config(base_config)
 
     # Override epochs if quick mode
     if args.quick:

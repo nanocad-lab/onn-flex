@@ -215,8 +215,8 @@ def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
     jtc = JTC(config)
 
     torch.manual_seed(2)
-    signal = torch.randn(1, config.jtc_half_size) / 4
-    kernel = torch.randn(1, config.jtc_half_size) / 4
+    signal = torch.randn(1, config.input_length) / 4
+    kernel = torch.randn(1, config.kernel_length) / 4
 
     with torch.no_grad():
         stage_data = jtc.compute_stage_tensors(signal, kernel)

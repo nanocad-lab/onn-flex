@@ -355,28 +355,20 @@ class TestConvBackends:
         assert output.shape == (2, 16, 32, 32)
 
     def test_jtc_plane_size_warning(self, base_config):
-        """Test that undersized JTC plane triggers warning."""
+        """Test that undersized JTC plane raises validation error."""
         # Set JTC plane too small
         base_config.conv_backend = "fourier"
         base_config.jtc_total_field = 10  # Too small for kernel_size=8, sep=8
         base_config.jtc_separation = 8
 
-        layer = FTconvlayer(
-            in_channels=3,
-            out_channels=16,
-            config=base_config,
-            kernel_size=8,
-            batch_size=2,
-        )
-
-        test_input = torch.randn(2, 3, 32, 32)
-
-        # Should produce a warning about aliasing
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            output = layer(test_input)
-            assert len(w) > 0
-            assert "aliasing" in str(w[0].message).lower()
+        with pytest.raises(ValueError):
+            FTconvlayer(
+                in_channels=3,
+                out_channels=16,
+                config=base_config,
+                kernel_size=8,
+                batch_size=2,
+            )
 
     def test_pytorch_backend_flexible_sizes(self, base_config):
         """Test that PyTorch backend handles various sizes."""
