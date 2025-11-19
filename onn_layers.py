@@ -1,14 +1,16 @@
 import math
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
+from torch.nn.modules.utils import _pair
 from onn_config import AppConfig
 from onn_component import JTC
+from jtc_cycle_planner import compute_contamination_profile
 
-__all__ = ["FTconvlayer"]
+__all__ = ["FTconvlayer", "FTConv2d"]
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -531,6 +533,229 @@ class FTconvlayer(_ConvNd):
                 0, 1, 3, 2
             )
         return self.pseudo_forward(x, self.weights)
+
+
+class FTConv2d(Module):
+    """Row-wise photonic convolution layer with shared variable-length logic."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int | tuple[int, int],
+        config: AppConfig,
+        stride: int | tuple[int, int] = 1,
+        padding: str = "same",
+        dilation: int | tuple[int, int] = 1,
+        groups: int = 1,
+        bias: bool = True,
+        conv_backend: Optional[str] = None,
+    ) -> None:
+        super().__init__()
+        if groups != 1:
+            raise ValueError("FTConv2d currently supports groups=1 only.")
+        stride_pair = _pair(stride)
+        dilation_pair = _pair(dilation)
+        if stride_pair != (1, 1) or dilation_pair != (1, 1):
+            raise ValueError("Only stride=1 and dilation=1 are supported.")
+        if padding != "same":
+            raise ValueError("Only padding='same' is supported.")
+
+        k_h, k_w = _pair(kernel_size)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = (k_h, k_w)
+        self.config = config
+        self.conv_backend = conv_backend or config.conv_backend or "pytorch"
+        if self.conv_backend not in ("pytorch", "fourier", "jtc_emulation"):
+            raise ValueError(
+                "FTConv2d backend must be 'pytorch', 'fourier', or 'jtc_emulation', "
+                f"got {self.conv_backend}"
+            )
+
+        self.patch_length = int(config.input_length)
+        self.kernel_length = int(config.kernel_length)
+        if self.kernel_length != k_w:
+            raise ValueError(
+                f"kernel_width ({k_w}) must match config.kernel_length ({self.kernel_length})"
+            )
+        if self.patch_length < self.kernel_length:
+            raise ValueError(
+                f"input_length ({self.patch_length}) must be >= kernel_length ({self.kernel_length})"
+            )
+
+        total_out, _, eff_stride = compute_contamination_profile(
+            self.patch_length,
+            self.kernel_length,
+            int(config.jtc_total_field),
+            int(config.jtc_separation),
+        )
+        valid_per_patch = self.patch_length - self.kernel_length + 1
+        if valid_per_patch <= 0:
+            raise ValueError("Patch configuration yields no valid outputs per pass.")
+        if total_out == 0:
+            raise ValueError("Invalid JTC geometry: no usable outputs.")
+        self.valid_per_patch = valid_per_patch
+        self.effective_stride = eff_stride if eff_stride > 0 else valid_per_patch
+
+        pad_h_total = self.kernel_size[0] - 1
+        pad_w_total = self.kernel_size[1] - 1
+        self.pad_h = (pad_h_total // 2, pad_h_total - pad_h_total // 2)
+        self.pad_w = (pad_w_total // 2, pad_w_total - pad_w_total // 2)
+
+        self.weight = Parameter(
+            torch.empty(out_channels, in_channels, *self.kernel_size)
+        )
+        if bias:
+            self.bias = Parameter(torch.empty(out_channels))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+        self.jtc: Optional[JTC] = JTC(config) if self.conv_backend == "jtc_emulation" else None
+
+    def reset_parameters(self) -> None:
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in)
+            init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError("FTConv2d expects input of shape [B, C, H, W].")
+        x_padded = self._pad_input(x)
+        batch_size, _, _, _ = x_padded.shape
+        _, _, height, width = x.shape
+        out = x.new_zeros(batch_size, self.out_channels, height, width)
+
+        for k_row in range(self.kernel_size[0]):
+            rows = x_padded[:, :, k_row : k_row + height, :]
+            kernels = self.weight[:, :, k_row, :]
+            out += self._row_convolution(rows, kernels, width)
+
+        if self.bias is not None:
+            out = out + self.bias.view(1, -1, 1, 1)
+        return out
+
+    def _pad_input(self, x: torch.Tensor) -> torch.Tensor:
+        left, right = self.pad_w
+        top, bottom = self.pad_h
+        if left == right == top == bottom == 0:
+            return x
+        return F.pad(x, (left, right, top, bottom))
+
+    def _row_convolution(
+        self, rows: torch.Tensor, kernels: torch.Tensor, output_width: int
+    ) -> torch.Tensor:
+        batch_size, _, height, _ = rows.shape
+        out = rows.new_zeros(batch_size, self.out_channels, height, output_width)
+        for c_in in range(self.in_channels):
+            signal = rows[:, c_in, :, :]
+            kernel = kernels[:, c_in, :]
+            if torch.all(kernel == 0):
+                continue
+            out += self._single_channel_row_conv(signal, kernel, output_width)
+        return out
+
+    def _single_channel_row_conv(
+        self, signal_rows: torch.Tensor, kernel: torch.Tensor, output_width: int
+    ) -> torch.Tensor:
+        batch_size, height, row_width = signal_rows.shape
+        stride = max(1, min(self.effective_stride, self.valid_per_patch))
+        max_start = max(row_width - self.patch_length, 0)
+        out = signal_rows.new_zeros(batch_size, self.out_channels, height, output_width)
+        out_col = 0
+        pass_idx = 0
+
+        while out_col < output_width:
+            patch_start = min(pass_idx * stride, max_start)
+            patch = signal_rows[..., patch_start : patch_start + self.patch_length]
+            if patch.size(-1) < self.patch_length:
+                patch = F.pad(patch, (0, self.patch_length - patch.size(-1)))
+            patch_out = self._apply_patch_conv(patch, kernel)
+            valid_slice = patch_out[
+                ..., self.kernel_length - 1 : self.kernel_length - 1 + self.valid_per_patch
+            ]
+            usable = min(stride, self.valid_per_patch, output_width - out_col)
+            slice_offset = out_col - patch_start
+            max_offset = self.valid_per_patch - usable
+            if slice_offset < 0:
+                slice_offset = 0
+            if slice_offset > max_offset:
+                slice_offset = max_offset
+            out[..., out_col : out_col + usable] = valid_slice[
+                ..., slice_offset : slice_offset + usable
+            ]
+            out_col += usable
+            pass_idx += 1
+        return out
+
+    def _apply_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        if self.conv_backend == "pytorch":
+            return self._pytorch_patch_conv(patch, kernel)
+        if self.conv_backend == "fourier":
+            return self._fourier_patch_conv(patch, kernel)
+        if self.conv_backend == "jtc_emulation":
+            return self._jtc_patch_conv(patch, kernel)
+        raise RuntimeError(f"Unsupported backend {self.conv_backend}")
+
+    def _pytorch_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        batch_size, height, _ = patch.shape
+        patch_flat = patch.reshape(batch_size * height, 1, self.patch_length)
+        weight = kernel.unsqueeze(1)
+        conv = F.conv1d(
+            patch_flat,
+            weight,
+            bias=None,
+            stride=1,
+            padding=self.kernel_length - 1,
+        )
+        conv = conv.view(batch_size, height, self.out_channels, -1)
+        return conv.permute(0, 2, 1, 3)
+
+    def _fourier_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        batch_size, height, _ = patch.shape
+        fft_len = self.patch_length + self.kernel_length - 1
+        patch_flat = patch.reshape(batch_size * height, self.patch_length)
+        kernel_flat = torch.flip(kernel, dims=[1]).reshape(
+            self.out_channels, self.kernel_length
+        )
+
+        signal_fft = torch.fft.rfft(patch_flat, n=fft_len)
+        kernel_fft = torch.fft.rfft(kernel_flat, n=fft_len)
+        product = signal_fft.unsqueeze(1) * kernel_fft.unsqueeze(0)
+        conv = torch.fft.irfft(product, n=fft_len)
+        conv = conv.view(batch_size, height, self.out_channels, fft_len)
+        return conv.permute(0, 2, 1, 3)
+
+    def _jtc_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        if self.jtc is None:
+            self.jtc = JTC(self.config)
+        patch_4d = patch.unsqueeze(2)  # B, H, 1, W
+        kernel_pos = torch.clamp(kernel, min=0.0)
+        kernel_neg = torch.clamp(-kernel, min=0.0)
+
+        result_pos: Optional[torch.Tensor] = None
+        result_neg: Optional[torch.Tensor] = None
+
+        if torch.any(kernel_pos):
+            result_pos = self.jtc(patch_4d, kernel_pos).permute(0, 2, 1, 3)
+        if torch.any(kernel_neg):
+            result_neg = self.jtc(patch_4d, kernel_neg).permute(0, 2, 1, 3)
+
+        if result_pos is None and result_neg is None:
+            return patch.new_zeros(
+                patch.size(0),
+                self.out_channels,
+                patch.size(1),
+                self.patch_length + self.kernel_length - 1,
+            )
+        if result_pos is None:
+            return -result_neg  # type: ignore[return-value]
+        if result_neg is None:
+            return result_pos
+        return result_pos - result_neg
 
 
 def _uniform_quantize(x, bits: int, s: float = 1.0, signed: bool = False):

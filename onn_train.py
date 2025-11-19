@@ -15,7 +15,7 @@ import torchvision.transforms as transforms
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-from onn_layers import FTconvlayer
+from onn_layers import FTconvlayer, FTConv2d
 from onn_config import AppConfig
 from diagnostics.pretrain_tests import run_pretrain_tests
 
@@ -33,51 +33,77 @@ DISTORTION_STRENGTH_FIELDS = [
 
 def get_data_loaders(
     batch_size: int,
-) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-    """Create CIFAR-10 train / test dataloaders with the same augmentation
-    pipeline used in the original template."""
-    # stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    dataset: str = "cifar10",
+    return_meta: bool = False,
+) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader] | Tuple[
+    torch.utils.data.DataLoader, torch.utils.data.DataLoader, int, int
+]:
+    """Create dataset-specific train/test loaders.
 
-    train_transform = transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
-            transforms.ToTensor(),
-            # transforms.Normalize(*stats, inplace=True),
-        ]
-    )
-    test_transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            # transforms.Normalize(*stats),
-        ]
-    )
+    Args:
+        batch_size: Mini-batch size.
+        dataset: 'cifar10' or 'mnist'.
+        return_meta: If True, also return (in_channels, num_classes).
+    """
 
-    trainset = torchvision.datasets.CIFAR10(
-        root="./data", train=True, download=True, transform=train_transform
-    )
-    testset = torchvision.datasets.CIFAR10(
-        root="./data", train=False, download=True, transform=test_transform
-    )
+    dataset = dataset.lower()
+    if dataset == "cifar10":
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
+                transforms.ToTensor(),
+            ]
+        )
+        test_transform = transforms.Compose([transforms.ToTensor()])
+        trainset = torchvision.datasets.CIFAR10(
+            root="./data", train=True, download=True, transform=train_transform
+        )
+        testset = torchvision.datasets.CIFAR10(
+            root="./data", train=False, download=True, transform=test_transform
+        )
+        in_channels = 3
+        num_classes = 10
+    elif dataset == "mnist":
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomRotation(10),
+                transforms.Resize(32),
+                transforms.ToTensor(),
+            ]
+        )
+        test_transform = transforms.Compose(
+            [
+                transforms.Resize(32),
+                transforms.ToTensor(),
+            ]
+        )
+        trainset = torchvision.datasets.MNIST(
+            root="./data", train=True, download=True, transform=train_transform
+        )
+        testset = torchvision.datasets.MNIST(
+            root="./data", train=False, download=True, transform=test_transform
+        )
+        in_channels = 1
+        num_classes = 10
+    else:
+        raise ValueError(f"Unsupported dataset '{dataset}'.")
 
-    trainloader = torch.utils.data.DataLoader(
-        trainset,
-        batch_size=batch_size,
-        shuffle=True,
+    common_loader_kwargs = dict(
         num_workers=8,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
+    )
+    trainloader = torch.utils.data.DataLoader(
+        trainset, batch_size=batch_size, shuffle=True, **common_loader_kwargs
     )
     testloader = torch.utils.data.DataLoader(
-        testset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2,
+        testset, batch_size=batch_size, shuffle=False, **common_loader_kwargs
     )
+
+    if return_meta:
+        return trainloader, testloader, in_channels, num_classes
     return trainloader, testloader
 
 
@@ -92,12 +118,13 @@ class FFTConvNet(nn.Module):
     The number of identical intermediate blocks (originally 5) can be varied
     through `config.num_identical_layers`."""
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, in_channels: int = 3, num_classes: int = 10):
         super().__init__()
+        self.num_classes = num_classes
 
         # Stem
         self.conv1 = FTconvlayer(
-            3,
+            in_channels,
             8,
             config=config,
             kernel_size=8,
@@ -144,7 +171,7 @@ class FFTConvNet(nn.Module):
             nn.MaxPool2d(2),
             nn.Flatten(),
             nn.Linear(512, 256),
-            nn.Linear(256, 10),
+            nn.Linear(256, num_classes),
         )
 
     # pylint: disable=arguments-differ
@@ -162,6 +189,73 @@ class FFTConvNet(nn.Module):
         x = self.blocks(x)
         x = self.classifier(x)
         return x
+
+
+class FTVGG11(nn.Module):
+    """VGG11-style network built from FTConv2d blocks."""
+
+    def __init__(self, config: AppConfig, in_channels: int = 3, num_classes: int = 10):
+        super().__init__()
+        self.config = config
+        self.num_classes = num_classes
+
+        self.features = nn.Sequential(
+            self._conv_block(in_channels, 64),
+            nn.MaxPool2d(2),
+            self._conv_block(64, 128),
+            nn.MaxPool2d(2),
+            self._conv_block(128, 256),
+            self._conv_block(256, 256),
+            nn.MaxPool2d(2),
+            self._conv_block(256, 512),
+            self._conv_block(512, 512),
+            nn.MaxPool2d(2),
+            self._conv_block(512, 512),
+            self._conv_block(512, 512),
+            nn.MaxPool2d(2),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes),
+        )
+
+    def _conv_block(self, in_channels: int, out_channels: int) -> nn.Sequential:
+        return nn.Sequential(
+            FTConv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=3,
+                config=self.config,
+                conv_backend=self.config.conv_backend,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+def create_model(
+    config: AppConfig, in_channels: int, num_classes: int
+) -> nn.Module:
+    """Factory for building the selected architecture."""
+    arch = (config.model_arch or "fftconvnet").lower()
+    if arch == "fftconvnet":
+        return FFTConvNet(config, in_channels, num_classes)
+    if arch == "ftvgg11":
+        return FTVGG11(config, in_channels, num_classes)
+    raise ValueError(f"Unsupported model_arch '{config.model_arch}'")
 
 
 # -------------------------------
@@ -195,6 +289,8 @@ def run_full_strength_inference(
     config: AppConfig,
     dataloader: torch.utils.data.DataLoader,
     device: torch.device,
+    in_channels: int,
+    num_classes: int,
 ) -> float:
     if not DISTORTION_STRENGTH_FIELDS:
         return float("nan")
@@ -203,7 +299,7 @@ def run_full_strength_inference(
     for field in DISTORTION_STRENGTH_FIELDS:
         setattr(distortion_config, field, 1.0)
 
-    ref_model = FFTConvNet(distortion_config).to(device)
+    ref_model = create_model(distortion_config, in_channels, num_classes).to(device)
     ref_model.load_state_dict(model.state_dict())
 
     try:
@@ -261,11 +357,18 @@ def train_onn_model(config: AppConfig) -> float:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Build dataset loaders
-    trainloader, testloader = get_data_loaders(config.batch_size)
+    # Build dataset loaders and retrieve dataset metadata
+    (
+        trainloader,
+        testloader,
+        in_channels,
+        num_classes,
+    ) = get_data_loaders(
+        config.batch_size, dataset=config.dataset, return_meta=True
+    )
 
     # Build model
-    model = FFTConvNet(config).to(device)
+    model = create_model(config, in_channels, num_classes).to(device)
 
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:
@@ -348,7 +451,9 @@ def train_onn_model(config: AppConfig) -> float:
 
     distortion_acc = None
     if DISTORTION_STRENGTH_FIELDS:
-        distortion_acc = run_full_strength_inference(model, config, testloader, device)
+        distortion_acc = run_full_strength_inference(
+            model, config, testloader, device, in_channels, num_classes
+        )
         print(
             f"[INFO] Accuracy with all distortion strengths set to 1.0: {distortion_acc:.2f}%"
         )

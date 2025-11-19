@@ -303,6 +303,20 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         ],
         help="Quantizer type for activations, weights, outputs, and Fourier plane",
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=yaml_config.dataset,
+        choices=["cifar10", "mnist"],
+        help="Dataset to use for training/evaluation",
+    )
+    parser.add_argument(
+        "--model-arch",
+        type=str,
+        default=yaml_config.model_arch,
+        choices=["fftconvnet", "ftvgg11"],
+        help="Model architecture to train (FFTConvNet or FTConv2d-based VGG11)",
+    )
 
     # Optional activation normalization inside identical blocks
     parser.add_argument(

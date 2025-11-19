@@ -70,6 +70,10 @@ class AppConfig:
     # Options: 'ste_clipped', 'ste_maxscale', 'ios', 'mad', 'mph', 'pwl'
     quantizer: str = "ste_clipped"
 
+    # Dataset / model selection
+    dataset: str = "cifar10"  # Options: 'cifar10', 'mnist'
+    model_arch: str = "fftconvnet"  # Options: 'fftconvnet', 'ftvgg11'
+
     # ------------------------------------------------------------------
     #  Training / model-related CLI overrides
     # ------------------------------------------------------------------
@@ -92,4 +96,14 @@ class AppConfig:
             raise ValueError(
                 f"Invalid conv_backend '{self.conv_backend}'. "
                 f"Must be one of {valid_backends}"
+            )
+        valid_datasets = {'cifar10', 'mnist'}
+        if self.dataset.lower() not in valid_datasets:
+            raise ValueError(
+                f"Invalid dataset '{self.dataset}'. Must be one of {sorted(valid_datasets)}"
+            )
+        valid_models = {'fftconvnet', 'ftvgg11'}
+        if self.model_arch.lower() not in valid_models:
+            raise ValueError(
+                f"Invalid model_arch '{self.model_arch}'. Must be one of {sorted(valid_models)}"
             )
