@@ -701,11 +701,11 @@ class JTC(nn.Module):
             )
             self.pre_lens_poly = module
             self.transfer_fit_stats["pre_lens"] = stats
-            print(
-                "[SIMPLIFY] Pre-lens magnitude deg "
-                f"{stats['mag_degree']} (rel_rmse={stats['mag_error']:.2e}, R^2={stats['mag_r2']:.4f}), "
-                f"phase deg {stats['phase_degree']} (rel_rmse={stats['phase_error']:.2e}, R^2={stats['phase_r2']:.4f})"
-            )
+            # print(
+            #     "[SIMPLIFY] Pre-lens magnitude deg "
+            #     f"{stats['mag_degree']} (rel_rmse={stats['mag_error']:.2e}, R^2={stats['mag_r2']:.4f}), "
+            #     f"phase deg {stats['phase_degree']} (rel_rmse={stats['phase_error']:.2e}, R^2={stats['phase_r2']:.4f})"
+            # )
         except Exception as exc:  # pragma: no cover - debug helper
             warnings.warn(
                 f"Pre-lens transfer simplification failed: {exc}", RuntimeWarning
@@ -725,10 +725,10 @@ class JTC(nn.Module):
             )
             self.post_lens_poly = module
             self.transfer_fit_stats["post_lens"] = stats
-            print(
-                "[SIMPLIFY] Post-lens degree "
-                f"{stats['degree']} (rel_rmse={stats['error']:.2e}, R^2={stats['r2']:.4f})"
-            )
+            #print(
+            #    "[SIMPLIFY] Post-lens degree "
+            #    f"{stats['degree']} (rel_rmse={stats['error']:.2e}, R^2={stats['r2']:.4f})"
+            #)
         except Exception as exc:  # pragma: no cover
             warnings.warn(
                 f"Post-lens transfer simplification failed: {exc}", RuntimeWarning
