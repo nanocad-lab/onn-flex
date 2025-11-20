@@ -1,0 +1,21 @@
+# VGG19 Fourier Backend with Fourier Plane Quantization
+dataset: cifar10
+model_arch: ftvgg19
+conv_backend: fourier
+
+# Specific Geometry
+input_length: 8
+kernel_length: 3
+jtc_separation: 7
+jtc_total_field: 32
+
+# Quantization
+fourier_plane_bits: 6
+dac_bits: 4
+adc_bits: 6
+
+# Training
+batch_size: 32
+learning_rate: 0.001
+num_epochs: 1
+output_dir: runs/vgg19_fourier_quant

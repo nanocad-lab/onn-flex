@@ -4,6 +4,11 @@ import yaml
 from typing import Optional, Any, Dict
 from onn_train import train_onn_model
 from onn_config import AppConfig
+from jtc_cycle_planner import (
+    compute_contamination_profile,
+    find_clean_geometry,
+    DEFAULT_GEOMETRY_SEARCH_LIMIT,
+)
 
 
 def parse_initial_args() -> tuple[Optional[str], Optional[str]]:
@@ -24,6 +29,54 @@ def parse_initial_args() -> tuple[Optional[str], Optional[str]]:
     return args.config_file, args.output_dir
 
 
+def _auto_select_geometry(config: AppConfig) -> None:
+    try:
+        _, clean_valid, _ = compute_contamination_profile(
+            config.input_length,
+            config.kernel_length,
+            config.jtc_total_field,
+            config.jtc_separation,
+        )
+    except Exception:
+        return
+
+    if clean_valid > 0:
+        return
+
+    lens_limit = getattr(config, "geometry_autopick_max_lens", None)
+    if lens_limit is None:
+        lens_limit = DEFAULT_GEOMETRY_SEARCH_LIMIT
+    if lens_limit is not None and lens_limit <= 0:
+        return
+
+    best = find_clean_geometry(
+        config.input_length,
+        config.kernel_length,
+        max_lens_size=lens_limit,
+    )
+    if best is None:
+        limit_msg = (
+            f"lens size ≤ {lens_limit}"
+            if lens_limit is not None
+            else "the configured lens limit"
+        )
+        print(
+            f"[CONFIG] Unable to find a clean JTC geometry with {limit_msg};"
+            " keeping existing parameters."
+        )
+        return
+
+    sep, lens, clean, stride = best
+    config.jtc_separation = sep
+    config.jtc_total_field = lens
+    print(
+        (
+            f"[CONFIG] Auto-selected JTC geometry: lens={lens}, sep={sep}, "
+            f"clean_valid={clean}, stride={stride}"
+        )
+    )
+
+
 def load_yaml_config(config_path: str) -> AppConfig:
     """Load application config from YAML file."""
     try:
@@ -37,13 +90,19 @@ def load_yaml_config(config_path: str) -> AppConfig:
             if k in [field.name for field in AppConfig.__dataclass_fields__.values()]
         }
 
-        return AppConfig(**valid_config)
+        cfg = AppConfig(**valid_config)
+        _auto_select_geometry(cfg)
+        return cfg
     except FileNotFoundError:
         print(f"Config file {config_path} not found. Using defaults.")
-        return AppConfig()
+        cfg = AppConfig()
+        _auto_select_geometry(cfg)
+        return cfg
     except Exception as e:
         print(f"Error loading config: {str(e)}. Using defaults.")
-        return AppConfig()
+        cfg = AppConfig()
+        _auto_select_geometry(cfg)
+        return cfg
 
 
 def _str2bool(v: str) -> bool:
@@ -126,6 +185,15 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         type=int,
         default=yaml_config.jtc_total_field,
         help="Total size of the JTC plane (lens size)",
+    )
+    parser.add_argument(
+        "--geometry-autopick-max-lens",
+        type=int,
+        default=yaml_config.geometry_autopick_max_lens,
+        help=(
+            "Upper bound for the lens size scan when auto-selecting geometry. "
+            "Set <=0 to disable automatic overrides."
+        ),
     )
 
     # Quantization parameters
@@ -273,11 +341,12 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--conv-backend",
         type=str,
         default=yaml_config.conv_backend,
-        choices=["pytorch", "fourier", "jtc_emulation"],
+        choices=["pytorch", "fourier", "jtc_emulation", "jtc_fast"],
         help=(
             "Convolution backend: 'pytorch' (PyTorch conv2d), "
-            "'fourier' (FFT-based software JTC), or "
-            "'jtc_emulation' (full hardware JTC emulation)"
+            "'fourier' (FFT-based software JTC), "
+            "'jtc_emulation' (full hardware JTC emulation), or "
+            "'jtc_fast' (Approximated JTC with distortions)"
         ),
     )
     parser.add_argument(
@@ -304,6 +373,42 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Quantizer type for activations, weights, outputs, and Fourier plane",
     )
     parser.add_argument(
+        "--simplify-transfer-functions",
+        action="store_true",
+        default=yaml_config.simplify_transfer_functions,
+        help="Fit minimal-order polynomials for the pre/post-lens transfer cascades",
+    )
+    parser.add_argument(
+        "--no-simplify-transfer-functions",
+        dest="simplify_transfer_functions",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--transfer-fit-samples",
+        type=int,
+        default=yaml_config.transfer_fit_samples,
+        help="Number of sample points used when fitting simplified transfer functions",
+    )
+    parser.add_argument(
+        "--transfer-fit-tolerance",
+        type=float,
+        default=yaml_config.transfer_fit_tolerance,
+        help="Relative RMSE ceiling for transfer-function polynomial fits",
+    )
+    parser.add_argument(
+        "--transfer-fit-max-degree",
+        type=int,
+        default=yaml_config.transfer_fit_max_degree,
+        help="Maximum polynomial degree to consider for transfer-function fitting",
+    )
+    parser.add_argument(
+        "--transfer-fit-min-r2",
+        type=float,
+        default=yaml_config.transfer_fit_min_r2,
+        help="Minimum R^2 that a simplified transfer polynomial must achieve",
+    )
+    parser.add_argument(
         "--dataset",
         type=str,
         default=yaml_config.dataset,
@@ -314,8 +419,22 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--model-arch",
         type=str,
         default=yaml_config.model_arch,
-        choices=["fftconvnet", "ftvgg11"],
-        help="Model architecture to train (FFTConvNet or FTConv2d-based VGG11)",
+        choices=["fftconvnet", "ftvgg11", "ftvgg13", "ftvgg16", "ftvgg19"],
+        help="Model architecture to train (FFTConvNet or FTConv2d-based VGG variants)",
+    )
+    parser.add_argument(
+        "--vgg-variant",
+        type=str,
+        default=yaml_config.vgg_variant,
+        choices=["vgg3", "vgg5", "vgg9", "vgg11", "vgg13", "vgg16", "vgg19"],
+        help="Depth of the FT-VGG stack when using ftvgg* architectures",
+    )
+    
+    parser.add_argument(
+        "--override-effective-stride",
+        type=int,
+        default=yaml_config.override_effective_stride,
+        help="Force a specific effective stride, overriding contamination checks",
     )
 
     # Optional activation normalization inside identical blocks
@@ -345,6 +464,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Number of training epochs",
     )
     parser.add_argument(
+        "--pretrain-epochs",
+        dest="pretrain_epochs",
+        type=int,
+        default=yaml_config.pretrain_epochs,
+        help="Number of epochs to pre-train using PyTorch backend before switching to selected backend",
+    )
+    parser.add_argument(
         "--learning-rate",
         dest="learning_rate",
         type=float,
@@ -357,6 +483,20 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         type=int,
         default=yaml_config.batch_size,
         help="Training batch size",
+    )
+    parser.add_argument(
+        "--max-train-steps",
+        dest="max_train_steps",
+        type=int,
+        default=yaml_config.max_train_steps,
+        help="Optional cap on the total number of optimizer steps",
+    )
+    parser.add_argument(
+        "--max-eval-batches",
+        dest="max_eval_batches",
+        type=int,
+        default=yaml_config.max_eval_batches,
+        help="Limit evaluation to the first N batches (omit or <=0 for full eval)",
     )
     parser.add_argument(
         "--eval-only",
@@ -387,6 +527,32 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         action="store_true",
         default=yaml_config.pretrain_tests_only,
         help="Run only the pretrain tests/plots and exit",
+    )
+    parser.add_argument(
+        "--skip-eval",
+        dest="skip_eval",
+        action="store_true",
+        default=yaml_config.skip_eval,
+        help="Skip validation/testing passes for faster debugging runs",
+    )
+    parser.add_argument(
+        "--no-skip-eval",
+        dest="skip_eval",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--dump-memory-summary",
+        dest="dump_memory_summary",
+        action="store_true",
+        default=yaml_config.dump_memory_summary,
+        help="Write torch.cuda.memory_summary() to <output_dir>/memory_summary.txt",
+    )
+    parser.add_argument(
+        "--no-dump-memory-summary",
+        dest="dump_memory_summary",
+        action="store_false",
+        help=argparse.SUPPRESS,
     )
 
     args = parser.parse_args()
@@ -420,6 +586,9 @@ def main():
 
     # Step 3: Parse CLI args using YAML values as defaults
     final_config = parse_cli_args(yaml_config)
+
+    # Auto-correct geometry once more in case CLI overrides changed dimensions
+    _auto_select_geometry(final_config)
 
     # Ensure we preserve the config_file path from initial parsing
     if config_path and not final_config.config_file:

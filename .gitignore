@@ -92,6 +92,7 @@ __pypackages__/
 .env
 .envrc
 .venv
+.venv311
 env/
 venv/
 ENV/

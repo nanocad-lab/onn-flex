@@ -1,0 +1,38 @@
+# Test Case 3: VGG11 Pretrain + Finetune
+# Pretrain with PyTorch, Finetune with JTC Fast
+dataset: cifar10
+model_arch: ftvgg11
+conv_backend: jtc_fast
+
+# Geometry (Robust A100 Config)
+jtc_total_field: 128
+input_length: 32
+kernel_length: 3
+jtc_separation: 29
+output_length: 32
+
+# Component Data (Real Distortions)
+driver_distortion_data_path: component_data/driver_sim_data.csv
+driver_distortion_strength: 1.0
+pd_tia_distortion_data_path: component_data/pd_tia_sim_data.csv
+pd_tia_distortion_strength: 1.0
+pd_distortion_data_path: component_data/pd_sim_data.csv
+pd_distortion_strength: 0.0
+tia_distortion_data_path: component_data/tia_sim_data.csv
+tia_distortion_strength: 0.0
+mrm_power_data_path: component_data/mrm_pwr_w_sim_data.csv
+mrm_power_distortion_strength: 1.0
+mrm_phase_data_path: component_data/mrm_phase_sim_data.csv
+mrm_phase_distortion_strength: 1.0
+
+# Quantization
+dac_bits: 4
+adc_bits: 6
+fourier_plane_bits: 6
+
+# Training Schedule
+pretrain_epochs: 20
+num_epochs: 3
+learning_rate: 0.001
+batch_size: 32
+output_dir: runs/test_vgg11_pretrain_finetune

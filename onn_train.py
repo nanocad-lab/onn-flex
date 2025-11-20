@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
+import math
 import os
 import yaml
 from dataclasses import fields as dataclass_fields
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -17,6 +19,7 @@ from tqdm import tqdm
 
 from onn_layers import FTconvlayer, FTConv2d
 from onn_config import AppConfig
+from onn_component import JTC
 from diagnostics.pretrain_tests import run_pretrain_tests
 
 DISTORTION_STRENGTH_FIELDS = [
@@ -24,6 +27,17 @@ DISTORTION_STRENGTH_FIELDS = [
     for f in dataclass_fields(AppConfig)
     if f.name.endswith("_distortion_strength")
 ]
+
+VGG_STAGE_CHANNELS = [64, 128, 256, 512, 512]
+VGG_VARIANT_CONFIGS: dict[str, list[int]] = {
+    "vgg3": [1, 1, 1, 0, 0],
+    "vgg5": [1, 1, 2, 1, 0],
+    "vgg9": [1, 1, 2, 2, 3],
+    "vgg11": [1, 1, 2, 2, 2],
+    "vgg13": [2, 2, 2, 2, 2],
+    "vgg16": [2, 2, 3, 3, 3],
+    "vgg19": [2, 2, 4, 4, 4],
+}
 
 
 # -------------------------------
@@ -191,33 +205,44 @@ class FFTConvNet(nn.Module):
         return x
 
 
-class FTVGG11(nn.Module):
-    """VGG11-style network built from FTConv2d blocks."""
+class FTVGG(nn.Module):
+    """FTConv2d-based VGG family with selectable depth (11/13/16/19)."""
 
-    def __init__(self, config: AppConfig, in_channels: int = 3, num_classes: int = 10):
+    def __init__(
+        self,
+        config: AppConfig,
+        variant: str,
+        in_channels: int = 3,
+        num_classes: int = 10,
+    ):
         super().__init__()
+        variant = variant.lower()
+        if variant not in VGG_VARIANT_CONFIGS:
+            raise ValueError(f"Unknown VGG variant '{variant}'")
         self.config = config
+        self.variant = variant
         self.num_classes = num_classes
+        feature_layers: list[nn.Module] = []
+        curr_in = in_channels
+        stage_cfg = VGG_VARIANT_CONFIGS[variant]
 
-        self.features = nn.Sequential(
-            self._conv_block(in_channels, 64),
-            nn.MaxPool2d(2),
-            self._conv_block(64, 128),
-            nn.MaxPool2d(2),
-            self._conv_block(128, 256),
-            self._conv_block(256, 256),
-            nn.MaxPool2d(2),
-            self._conv_block(256, 512),
-            self._conv_block(512, 512),
-            nn.MaxPool2d(2),
-            self._conv_block(512, 512),
-            self._conv_block(512, 512),
-            nn.MaxPool2d(2),
-        )
+        for stage_idx, convs in enumerate(stage_cfg):
+            out_channels = VGG_STAGE_CHANNELS[stage_idx]
+            if convs <= 0:
+                continue
+            for _ in range(convs):
+                feature_layers.append(
+                    self._conv_block(curr_in, out_channels, kernel_size=3)
+                )
+                curr_in = out_channels
+            feature_layers.append(nn.MaxPool2d(2))
 
+        feature_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
+        self.features = nn.Sequential(*feature_layers)
+        self.final_channels = curr_in
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(512, 512),
+            nn.Linear(self.final_channels, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
             nn.Linear(512, 512),
@@ -226,12 +251,12 @@ class FTVGG11(nn.Module):
             nn.Linear(512, num_classes),
         )
 
-    def _conv_block(self, in_channels: int, out_channels: int) -> nn.Sequential:
+    def _conv_block(self, in_channels: int, out_channels: int, kernel_size: int) -> nn.Sequential:
         return nn.Sequential(
             FTConv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
-                kernel_size=3,
+                kernel_size=kernel_size,
                 config=self.config,
                 conv_backend=self.config.conv_backend,
                 bias=False,
@@ -253,8 +278,25 @@ def create_model(
     arch = (config.model_arch or "fftconvnet").lower()
     if arch == "fftconvnet":
         return FFTConvNet(config, in_channels, num_classes)
-    if arch == "ftvgg11":
-        return FTVGG11(config, in_channels, num_classes)
+    if arch.startswith("ftvgg"):
+        variant = getattr(config, "vgg_variant", "vgg11").lower()
+        arch_variant_map = {
+            "ftvgg": None,
+            "ftvgg3": "vgg3",
+            "ftvgg5": "vgg5",
+            "ftvgg9": "vgg9",
+            "ftvgg11": "vgg11",
+            "ftvgg13": "vgg13",
+            "ftvgg16": "vgg16",
+            "ftvgg19": "vgg19",
+        }
+        mapped_variant = arch_variant_map.get(arch)
+        if mapped_variant and variant == "vgg11" and mapped_variant != "vgg11":
+            variant = mapped_variant
+            config.vgg_variant = variant
+        elif mapped_variant is None:
+            config.vgg_variant = variant
+        return FTVGG(config, config.vgg_variant.lower(), in_channels, num_classes)
     raise ValueError(f"Unsupported model_arch '{config.model_arch}'")
 
 
@@ -264,13 +306,20 @@ def create_model(
 
 
 def evaluate(
-    model: nn.Module, dataloader: torch.utils.data.DataLoader, device: torch.device
+    model: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    max_batches: Optional[int] = None,
 ) -> float:
+    if max_batches is not None and max_batches <= 0:
+        print("[INFO] Evaluation skipped (max_eval_batches <= 0).")
+        return float("nan")
+
     model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
-        for images, labels in dataloader:
+        for batch_idx, (images, labels) in enumerate(dataloader):
             images, labels = (
                 images.to(device, non_blocking=True),
                 labels.to(device, non_blocking=True),
@@ -279,8 +328,13 @@ def evaluate(
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
+            if max_batches is not None and (batch_idx + 1) >= max_batches:
+                break
+
+    if total == 0:
+        return float("nan")
     acc = 100 * correct / total
-    print(f"Accuracy: {acc:.3f}%")
+    print(f"Accuracy: {acc:.3f}% (batches={max_batches or 'all'})")
     return acc
 
 
@@ -291,6 +345,7 @@ def run_full_strength_inference(
     device: torch.device,
     in_channels: int,
     num_classes: int,
+    max_eval_batches: Optional[int] = None,
 ) -> float:
     if not DISTORTION_STRENGTH_FIELDS:
         return float("nan")
@@ -306,7 +361,7 @@ def run_full_strength_inference(
         print(
             "[INFO] Running inference with all distortion strength parameters set to 1.0"
         )
-        acc = evaluate(ref_model, dataloader, device)
+        acc = evaluate(ref_model, dataloader, device, max_batches=max_eval_batches)
     finally:
         if device.type == "cuda":
             ref_model.to("cpu")
@@ -370,6 +425,18 @@ def train_onn_model(config: AppConfig) -> float:
     # Build model
     model = create_model(config, in_channels, num_classes).to(device)
 
+    # Helper to switch backend of all FTConv2d layers
+    def set_model_backend(mdl, backend_name):
+        count = 0
+        for m in mdl.modules():
+            if isinstance(m, FTConv2d):
+                m.conv_backend = backend_name
+                # Re-init JTC if needed (e.g. switching from pytorch to jtc_fast)
+                if backend_name in ["jtc_emulation", "jtc_fast"] and m.jtc is None:
+                    m.jtc = JTC(m.config)
+                count += 1
+        print(f"[INFO] Switched {count} FTConv2d layers to backend: {backend_name}")
+
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:
         try:
@@ -385,6 +452,51 @@ def train_onn_model(config: AppConfig) -> float:
             print(
                 f"[WARN] Failed to load pretrained weights '{config.pretrained_weights}': {e}. Proceeding without."
             )
+            
+    # ---------------- Pre-Training (PyTorch) ----------------
+    if not config.eval_only and config.pretrain_epochs > 0:
+        print(f"\n[PRETRAIN] Starting {config.pretrain_epochs} epochs of PyTorch pretraining...")
+        original_backend = config.conv_backend
+        set_model_backend(model, "pytorch")
+        
+        # Create a separate optimizer for pretraining (fresh start)
+        pre_optim = optim.AdamW(model.parameters(), lr=config.learning_rate)
+        pre_crit = nn.CrossEntropyLoss()
+        pre_scaler = GradScaler() if device.type == "cuda" else None
+        
+        for epoch in range(config.pretrain_epochs):
+            model.train()
+            running_loss = 0.0
+            pbar = tqdm(trainloader, desc=f"[Pretrain] Epoch {epoch+1}/{config.pretrain_epochs}")
+            for inputs, labels in pbar:
+                inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                
+                with autocast(device_type=device.type, enabled=pre_scaler is not None):
+                    outputs = model(inputs)
+                    loss = pre_crit(outputs, labels)
+                
+                if pre_scaler is not None:
+                    pre_scaler.scale(loss).backward()
+                    pre_scaler.step(pre_optim)
+                    pre_scaler.update()
+                    pre_optim.zero_grad()
+                else:
+                    loss.backward()
+                    pre_optim.step()
+                    pre_optim.zero_grad()
+                
+                running_loss += loss.item()
+                pbar.set_postfix({"loss": f"{loss.item():.3f}"})
+            
+            # Optional: Quick eval
+            if not config.skip_eval:
+                acc = evaluate(model, testloader, device, max_batches=config.max_eval_batches)
+                print(f"[Pretrain] Epoch {epoch+1} Test Acc: {acc:.2f}%")
+        
+        print(f"[PRETRAIN] Finished. Switching back to {original_backend}...\n")
+        set_model_backend(model, original_backend)
+        # Restore config (though create_model used it initially, layers hold their own ref)
+        # FTConv2d layers now have original_backend set via helper.
 
     # ---------------- Evaluation-only path ----------------
     if config.eval_only:
@@ -396,79 +508,152 @@ def train_onn_model(config: AppConfig) -> float:
         print(f"Test accuracy: {test_acc:.2f}%")
         return test_acc
 
-    # ---------------- Training path -----------------------
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
+    summary_requested = device.type == "cuda" and config.dump_memory_summary
+    summary_path = os.path.join(config.output_dir, "memory_summary.txt")
 
-    best_acc = 0.0
-    scaler = GradScaler() if device.type == "cuda" else None
+    try:
+        # ---------------- Training path -----------------------
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
 
-    last_epoch_test_acc = 0.0
-    for epoch in range(config.num_epochs):
-        model.train()
-        running_loss = 0.0
-        pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{config.num_epochs - 1}")
-        for inputs, labels in pbar:
-            inputs, labels = (
-                inputs.to(device, non_blocking=True),
-                labels.to(device, non_blocking=True),
+        best_acc = 0.0
+        scaler = GradScaler() if device.type == "cuda" else None
+
+        last_epoch_test_acc = float("nan") if config.skip_eval else 0.0
+        steps_done = 0
+        stop_training = False
+        for epoch in range(config.num_epochs):
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+
+            model.train()
+            running_loss = 0.0
+            steps_this_epoch = 0
+            pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{config.num_epochs - 1}")
+            for inputs, labels in pbar:
+                inputs, labels = (
+                    inputs.to(device, non_blocking=True),
+                    labels.to(device, non_blocking=True),
+                )
+
+                with autocast(device_type=device.type, enabled=scaler is not None):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                else:
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                running_loss += loss.item()
+                steps_this_epoch += 1
+                steps_done += 1
+                pbar.set_postfix({"loss": f"{loss.item():.3f}"})
+
+                if config.max_train_steps and steps_done >= config.max_train_steps:
+                    stop_training = True
+                    pbar.set_postfix({"loss": f"{loss.item():.3f}", "note": "step_cap"})
+                    break
+
+            scheduler.step()
+
+            avg_loss = running_loss / max(1, steps_this_epoch)
+            if device.type == "cuda":
+                peak_alloc = torch.cuda.max_memory_allocated(device=device) / (1024**2)
+                peak_reserved = torch.cuda.max_memory_reserved(device=device) / (1024**2)
+                print(
+                    f"[MEM] Epoch {epoch}: peak allocated {peak_alloc:.1f} MB | reserved {peak_reserved:.1f} MB"
+                )
+
+            if config.skip_eval:
+                test_acc = float("nan")
+                train_acc = float("nan")
+            else:
+                test_acc = evaluate(
+                    model,
+                    testloader,
+                    device,
+                    max_batches=config.max_eval_batches,
+                )
+                last_epoch_test_acc = test_acc
+                train_acc = evaluate(
+                    model,
+                    trainloader,
+                    device,
+                    max_batches=config.max_eval_batches,
+                )
+                if not math.isnan(test_acc):
+                    best_acc = max(best_acc, test_acc)
+
+            print(
+                {
+                    "epoch": epoch,
+                    "train_acc": f"{train_acc:.2f}",
+                    "test_acc": f"{test_acc:.2f}",
+                    "best_acc": f"{best_acc:.2f}",
+                    "loss": f"{avg_loss:.3f}",
+                    "steps": steps_done,
+                }
             )
 
-            with autocast(device_type=device.type, enabled=scaler is not None):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+            if stop_training:
+                print(
+                    f"[INFO] Reached max_train_steps={config.max_train_steps}; stopping training loop."
+                )
+                break
 
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-            else:
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
+        distortion_acc = None
+        if DISTORTION_STRENGTH_FIELDS and not config.skip_eval:
+            distortion_acc = run_full_strength_inference(
+                model,
+                config,
+                testloader,
+                device,
+                in_channels,
+                num_classes,
+                max_eval_batches=config.max_eval_batches,
+            )
+            print(
+                f"[INFO] Accuracy with all distortion strengths set to 1.0: {distortion_acc:.2f}%"
+            )
 
-            running_loss += loss.item()
-            pbar.set_postfix({"loss": f"{loss.item():.3f}"})
+        # ---------------- Export -------------------------------
+        ckpt_path = os.path.join(config.output_dir, "fftconv_checkpoint.pth")
+        save_checkpoint(model, config, best_acc, ckpt_path)
+        # Save full model for structure reference (note: bigger file)
+        torch.save(model, os.path.join(config.output_dir, "fftconv_full_model.pth"))
 
-        scheduler.step()
+        # Also dump the final config for completeness
+        with open(os.path.join(config.output_dir, "final_config.yaml"), "w") as f:
+            yaml.dump(vars(config), f)
 
-        # Evaluate
-        test_acc = evaluate(model, testloader, device)
-        last_epoch_test_acc = test_acc
-        train_acc = evaluate(model, trainloader, device)
-        best_acc = max(best_acc, test_acc)
         print(
-            {
-                "epoch": epoch,
-                "train_acc": f"{train_acc:.2f}",
-                "test_acc": f"{test_acc:.2f}",
-                "best_acc": f"{best_acc:.2f}",
-                "loss": f"{running_loss / len(trainloader):.3f}",
-            }
+            f"Training finished. Last epoch test accuracy: {last_epoch_test_acc:.2f}% | Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
         )
-
-    distortion_acc = None
-    if DISTORTION_STRENGTH_FIELDS:
-        distortion_acc = run_full_strength_inference(
-            model, config, testloader, device, in_channels, num_classes
-        )
-        print(
-            f"[INFO] Accuracy with all distortion strengths set to 1.0: {distortion_acc:.2f}%"
-        )
-
-    # ---------------- Export -------------------------------
-    ckpt_path = os.path.join(config.output_dir, "fftconv_checkpoint.pth")
-    save_checkpoint(model, config, best_acc, ckpt_path)
-    # Save full model for structure reference (note: bigger file)
-    torch.save(model, os.path.join(config.output_dir, "fftconv_full_model.pth"))
-
-    # Also dump the final config for completeness
-    with open(os.path.join(config.output_dir, "final_config.yaml"), "w") as f:
-        yaml.dump(vars(config), f)
-
-    print(
-        f"Training finished. Last epoch test accuracy: {last_epoch_test_acc:.2f}% | Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
-    )
-    return last_epoch_test_acc
+        return last_epoch_test_acc
+    finally:
+        if summary_requested:
+            os.makedirs(config.output_dir, exist_ok=True)
+            try:
+                torch.cuda.synchronize()
+            except RuntimeError:
+                pass
+            with open(summary_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    torch.cuda.memory_summary(device=device, abbreviated=False)
+                )
+            print(f"[INFO] Wrote CUDA memory summary to {summary_path}")
+            snapshot_path = os.path.join(config.output_dir, "memory_snapshot.json")
+            try:
+                snapshot = torch.cuda.memory_snapshot()
+                with open(snapshot_path, "w", encoding="utf-8") as handle:
+                    json.dump(snapshot, handle)
+                print(f"[INFO] Wrote CUDA memory snapshot to {snapshot_path}")
+            except RuntimeError as exc:
+                print(f"[WARN] Unable to capture CUDA memory snapshot: {exc}")

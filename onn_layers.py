@@ -6,8 +6,9 @@ from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
 from torch.nn.modules.utils import _pair
+from torch.utils.checkpoint import checkpoint
 from onn_config import AppConfig
-from onn_component import JTC
+from onn_component import JTC, QuantDequant_STE
 from jtc_cycle_planner import compute_contamination_profile
 
 __all__ = ["FTconvlayer", "FTConv2d"]
@@ -19,87 +20,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def _check_8(x: int, name: str):
     if x != 8:
         raise ValueError(f"{name} length must be 8 for this implementation. Got {x}.")
-
-
-'''
-class PIC(nn.Module):
-    """In–memory implementation of the joint transform correlator used in the
-    original template. The interface is kept identical so that the training
-    script can be reused without changes."""
-
-    def __init__(self, plane_size: int, sep: int):
-        super().__init__()
-        self.plane_size = plane_size
-        self.sep = sep
-
-    def _perform_jtc_correlation_batch(
-        self, signal_batch: torch.Tensor, kernel_batch: torch.Tensor
-    ) -> torch.Tensor:
-        B = signal_batch.shape[0]
-        M = signal_batch.shape[-1]
-        N = kernel_batch.shape[-1]
-        _check_8(M, "Signal")
-        _check_8(N, "Kernel")
-
-        kernel_complex_batch = kernel_batch.to(torch.complex64)
-        signal_complex_batch = signal_batch.to(torch.complex64)
-
-        plane_size = self.plane_size
-        sep = self.sep
-
-        input_plane_batch = torch.zeros(
-            B, plane_size, dtype=torch.complex64, device=signal_batch.device
-        )
-
-        kernel_start = 0
-        kernel_end = kernel_start + M
-        signal_start = kernel_end + sep
-        signal_end = signal_start + N
-
-        input_plane_batch[:, kernel_start:kernel_end] = kernel_complex_batch
-        input_plane_batch[:, signal_start:signal_end] = signal_complex_batch
-
-        roll_amount = (plane_size // 2) - (M + signal_start) // 2
-        input_plane_batch = torch.roll(input_plane_batch, shifts=roll_amount, dims=-1)
-
-        jft_batch = torch.fft.fft(input_plane_batch, dim=-1)
-        jft_batch = torch.fft.fftshift(jft_batch, dim=-1)
-        jps_batch = torch.abs(jft_batch) ** 2 / plane_size
-
-        output_plane_fft_batch = torch.fft.fft(jps_batch, dim=-1)
-        output_plane_shifted_batch = torch.fft.fftshift(output_plane_fft_batch, dim=-1)
-        output_plane_abs_batch = torch.abs(output_plane_shifted_batch)
-
-        same_indices = (
-            torch.arange(
-                plane_size // 2 + sep + N // 2 + 1,
-                plane_size // 2 + sep + N // 2 + 1 + 8,
-                device=signal_batch.device,
-            )
-            % plane_size
-        )
-        return output_plane_abs_batch[:, same_indices]
-
-    def forward(self, input: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        ins = input.shape
-        wes = weights.shape
-        input_full = input.repeat(1, 1, wes[0], 1)
-        weight_full = weights.repeat(ins[0], ins[1], 1, 1)
-
-        batch_size_for_jtc = (
-            input_full.shape[0] * input_full.shape[1] * input_full.shape[2]
-        )
-        signal_reshaped = input_full.reshape(batch_size_for_jtc, 8)
-        kernel_reshaped = weight_full.reshape(batch_size_for_jtc, 8)
-
-        correlation_output_batched = self._perform_jtc_correlation_batch(
-            signal_reshaped, kernel_reshaped
-        )
-        output_reshaped = correlation_output_batched.reshape(
-            input_full.shape[0], input_full.shape[1], input_full.shape[2], 8
-        )
-        return output_reshaped
-'''
 
 
 class _ConvNd(Module):
@@ -361,11 +281,11 @@ class FTconvlayer(_ConvNd):
                 weight, self.config.dac_bits, domain="weight"
             )
 
-        # Repeat to pair each signal with each kernel (per-output channel)
-        input_full = x.repeat(1, 1, cout, 1)  # B H Cout W
-        weight_full = (
-            weight.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
-        )  # B H Cout W
+        # Pair each signal with each kernel (per-output channel) via views
+        input_full = x.unsqueeze(2).expand(-1, -1, cout, -1).contiguous()
+        weight_full = weight.unsqueeze(0).unsqueeze(0).expand(
+            batch_size, height, -1, -1
+        ).contiguous()
 
         # Save shapes
         B = input_full.shape[0]
@@ -411,11 +331,9 @@ class FTconvlayer(_ConvNd):
         roll_amount = (plane_size // 2) - (M + signal_start) // 2
         input_plane = torch.roll(input_plane, shifts=roll_amount, dims=-1)
 
-        # JTC physics: FFT -> fftshift -> Joint Power Spectrum (JPS)
+        # JTC physics: FFT -> Joint Power Spectrum (JPS)
         jft = torch.fft.fft(input_plane, dim=-1)
-        jft_shifted = torch.fft.fftshift(jft, dim=-1)
-        jps = torch.abs(jft_shifted) ** 2
-        jps = jps / plane_size
+        jps = torch.abs(jft) ** 2 / plane_size
 
         # Quantize at JPS if enabled (Fourier plane quantization)
         if self.config.fourier_plane_bits is not None:
@@ -423,16 +341,14 @@ class FTconvlayer(_ConvNd):
                 jps, self.config.fourier_plane_bits, domain="fourier"
             )
 
-        # Back to output plane: FFT -> fftshift -> magnitude
+        # Back to output plane: FFT -> magnitude
         # Output is magnitude (light intensity), always positive
         output_plane_fft = torch.fft.fft(jps, dim=-1)
-        output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
-        output_plane_abs = torch.abs(output_plane_shifted)
+        output_plane_abs = torch.abs(output_plane_fft)
 
         # Extract correlation output
-        # Formula: same_start = plane_size//2 + sep + N//2
-        # Note: Original formula had +1, but empirical analysis shows it should be removed
-        same_start = plane_size // 2 + sep + N // 2
+        # Formula without FFT shift: same_start = sep + N//2
+        same_start = (sep + N // 2) % plane_size
 
         # Extract full correlation (M+N-1 outputs) if config allows
         # For properly sized planes with adequate separation, full correlation is overlap-free
@@ -535,6 +451,116 @@ class FTconvlayer(_ConvNd):
         return self.pseudo_forward(x, self.weights)
 
 
+class FourierPatchConvFunction(torch.autograd.Function):
+    """Custom autograd for FFT-based multi-channel patch convolution."""
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        patch: torch.Tensor,
+        kernels: torch.Tensor,
+        patch_length: int,
+        kernel_length: int,
+        kernel_fft: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_size, height, in_channels, _ = patch.shape
+        out_channels = kernels.shape[0]
+        fft_len = patch_length + kernel_length - 1
+
+        patch_flat = patch.reshape(batch_size * height, in_channels, patch_length)
+
+        signal_fft = torch.fft.fft(patch_flat, n=fft_len, dim=-1)
+        if kernel_fft is None:
+            kernel_flip = torch.flip(kernels, dims=[2])
+            kernel_fft = torch.fft.fft(kernel_flip, n=fft_len, dim=-1)
+
+        ctx.save_for_backward(signal_fft, kernel_fft)
+        ctx.batch_size = batch_size
+        ctx.height = height
+        ctx.in_channels = in_channels
+        ctx.out_channels = out_channels
+        ctx.patch_length = patch_length
+        ctx.kernel_length = kernel_length
+        ctx.fft_len = fft_len
+        ctx.inputs_are_complex = patch.is_complex() or kernels.is_complex()
+
+        conv_fft = (signal_fft.unsqueeze(1) * kernel_fft.unsqueeze(0)).sum(dim=2)
+        conv = torch.fft.ifft(conv_fft, n=fft_len, dim=-1)
+        if not ctx.inputs_are_complex:
+            conv = conv.real
+        conv = conv.view(batch_size, height, out_channels, fft_len)
+        return conv.permute(0, 2, 1, 3).contiguous()
+
+    @staticmethod
+    def backward(
+        ctx: Any, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, None, None, None]:
+        signal_fft, kernel_fft = ctx.saved_tensors
+        batch_size = ctx.batch_size
+        height = ctx.height
+        in_channels = ctx.in_channels
+        out_channels = ctx.out_channels
+        fft_len = ctx.fft_len
+
+        grad_output = grad_output.permute(0, 2, 1, 3).reshape(
+            batch_size * height, out_channels, fft_len
+        )
+        grad_fft = torch.fft.fft(grad_output, n=fft_len, dim=-1)
+
+        grad_signal_fft = (
+            grad_fft.unsqueeze(2) * torch.conj(kernel_fft).unsqueeze(0)
+        ).sum(dim=1)
+        grad_kernel_fft = (
+            grad_fft.unsqueeze(2) * torch.conj(signal_fft).unsqueeze(1)
+        ).sum(dim=0)
+
+        grad_signal_time = torch.fft.ifft(grad_signal_fft, n=fft_len, dim=-1)
+        grad_kernel_time = torch.fft.ifft(grad_kernel_fft, n=fft_len, dim=-1)
+
+        if not ctx.inputs_are_complex:
+            grad_signal_time = grad_signal_time.real
+            grad_kernel_time = grad_kernel_time.real
+
+        start = ctx.kernel_length - 1
+        grad_signal_time = grad_signal_time[..., start : start + ctx.patch_length]
+        grad_patch = grad_signal_time.reshape(batch_size, height, in_channels, ctx.patch_length)
+
+        grad_kernel = grad_kernel_time[..., start : start + ctx.kernel_length]
+        grad_kernel = torch.flip(grad_kernel, dims=[-1])
+
+        return grad_patch, grad_kernel, None, None, None
+
+
+class CheckpointJTC(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, self_module, signal, kernel, output_width):
+        ctx.save_for_backward(signal, kernel)
+        ctx.output_width = output_width
+        ctx.self_module = self_module
+        with torch.no_grad():
+             out = self_module._chunk_channel_row_conv(signal, kernel, output_width)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        signal, kernel = ctx.saved_tensors
+        output_width = ctx.output_width
+        self_module = ctx.self_module
+        with torch.enable_grad():
+            s_detached = signal.detach()
+            s_detached.requires_grad = True
+            k_detached = kernel.detach()
+            k_detached.requires_grad = True
+            out = self_module._chunk_channel_row_conv(s_detached, k_detached, output_width)
+            grad_s, grad_k = torch.autograd.grad(
+                out, 
+                (s_detached, k_detached), 
+                grad_output,
+                allow_unused=True
+            )
+        return None, grad_s, grad_k, None
+
+
 class FTConv2d(Module):
     """Row-wise photonic convolution layer with shared variable-length logic."""
 
@@ -567,9 +593,9 @@ class FTConv2d(Module):
         self.kernel_size = (k_h, k_w)
         self.config = config
         self.conv_backend = conv_backend or config.conv_backend or "pytorch"
-        if self.conv_backend not in ("pytorch", "fourier", "jtc_emulation"):
+        if self.conv_backend not in ("pytorch", "fourier", "jtc_emulation", "jtc_fast"):
             raise ValueError(
-                "FTConv2d backend must be 'pytorch', 'fourier', or 'jtc_emulation', "
+                "FTConv2d backend must be 'pytorch', 'fourier', 'jtc_emulation', or 'jtc_fast', "
                 f"got {self.conv_backend}"
             )
 
@@ -593,10 +619,16 @@ class FTConv2d(Module):
         valid_per_patch = self.patch_length - self.kernel_length + 1
         if valid_per_patch <= 0:
             raise ValueError("Patch configuration yields no valid outputs per pass.")
-        if total_out == 0:
-            raise ValueError("Invalid JTC geometry: no usable outputs.")
         self.valid_per_patch = valid_per_patch
-        self.effective_stride = eff_stride if eff_stride > 0 else valid_per_patch
+            
+        # Determine effective stride
+        if config.override_effective_stride is not None and config.override_effective_stride > 0:
+            self.effective_stride = int(config.override_effective_stride)
+            # Note: _multi_channel_row_conv clamps this to valid_per_patch anyway
+        else:
+            if total_out == 0:
+                raise ValueError("Invalid JTC geometry: no usable outputs.")
+            self.effective_stride = eff_stride if eff_stride > 0 else valid_per_patch
 
         pad_h_total = self.kernel_size[0] - 1
         pad_w_total = self.kernel_size[1] - 1
@@ -648,14 +680,117 @@ class FTConv2d(Module):
     def _row_convolution(
         self, rows: torch.Tensor, kernels: torch.Tensor, output_width: int
     ) -> torch.Tensor:
+        if self.conv_backend == "jtc_emulation":
+            return self._row_convolution_single_channel(rows, kernels, output_width)
+        batch_size, _, height, row_width = rows.shape
+        signal_rows = rows.permute(0, 2, 1, 3).contiguous()
+        return self._multi_channel_row_conv(signal_rows, kernels, output_width, row_width)
+
+    def _multi_channel_row_conv(
+        self,
+        signal_rows: torch.Tensor,
+        kernels: torch.Tensor,
+        output_width: int,
+        row_width: int,
+    ) -> torch.Tensor:
+        batch_size, height, _, _ = signal_rows.shape
+        stride = max(1, min(self.effective_stride, self.valid_per_patch))
+        max_start = max(row_width - self.patch_length, 0)
+        out = signal_rows.new_zeros(batch_size, self.out_channels, height, output_width)
+        out_col = 0
+        pass_idx = 0
+
+        kernel_fft: Optional[torch.Tensor] = None
+        if self.conv_backend == "fourier":
+            fft_len = self.patch_length + self.kernel_length - 1
+            with torch.no_grad():
+                kernel_fft = torch.fft.fft(
+                    torch.flip(kernels, dims=[2]), n=fft_len, dim=-1
+                )
+
+        while out_col < output_width:
+            patch_start = min(pass_idx * stride, max_start)
+            patch = signal_rows[..., patch_start : patch_start + self.patch_length]
+            if patch.size(-1) < self.patch_length:
+                patch = F.pad(patch, (0, self.patch_length - patch.size(-1)))
+            patch = patch.contiguous()
+            patch_out = self._apply_patch_conv(patch, kernels, kernel_fft)
+            valid_slice = patch_out[
+                ..., self.kernel_length - 1 : self.kernel_length - 1 + self.valid_per_patch
+            ]
+            usable = min(stride, self.valid_per_patch, output_width - out_col)
+            slice_offset = out_col - patch_start
+            max_offset = self.valid_per_patch - usable
+            if slice_offset < 0:
+                slice_offset = 0
+            if slice_offset > max_offset:
+                slice_offset = max_offset
+            out_slice = out[..., out_col : out_col + usable]
+            src = valid_slice[..., slice_offset : slice_offset + usable]
+            out_slice.copy_(src)
+            out_col += usable
+            pass_idx += 1
+        return out
+
+    def _row_convolution_single_channel(
+        self, rows: torch.Tensor, kernels: torch.Tensor, output_width: int
+    ) -> torch.Tensor:
         batch_size, _, height, _ = rows.shape
-        out = rows.new_zeros(batch_size, self.out_channels, height, output_width)
-        for c_in in range(self.in_channels):
-            signal = rows[:, c_in, :, :]
-            kernel = kernels[:, c_in, :]
-            if torch.all(kernel == 0):
+        
+        # Collect partial results to avoid iterative graph building issues
+        results = []
+        
+        # Small chunk size keeps the backward graph manageable
+        chunk_size = 8
+        for c_start in range(0, self.in_channels, chunk_size):
+            c_end = min(c_start + chunk_size, self.in_channels)
+            signal_chunk = rows[:, c_start:c_end, :, :]
+            kernel_chunk = kernels[:, c_start:c_end, :]
+            
+            if torch.all(kernel_chunk == 0):
                 continue
-            out += self._single_channel_row_conv(signal, kernel, output_width)
+                
+            if self.training and signal_chunk.requires_grad:
+                def run_chunk(s, k):
+                    return self._chunk_channel_row_conv(s, k, output_width)
+                # Clone inputs to ensure independence for checkpointing
+                # use_reentrant=True is default and often safer for complex graphs
+                res = checkpoint(
+                    run_chunk, 
+                    signal_chunk.clone(), 
+                    kernel_chunk.clone(), 
+                    use_reentrant=True
+                )
+                results.append(res)
+            else:
+                res = self._chunk_channel_row_conv(signal_chunk, kernel_chunk, output_width)
+                results.append(res)
+        
+        if not results:
+            return rows.new_zeros(batch_size, self.out_channels, height, output_width)
+            
+        # Sum all partial results
+        return sum(results)
+
+    def _chunk_channel_row_conv(
+        self, signal_chunk: torch.Tensor, kernel_chunk: torch.Tensor, output_width: int
+    ) -> torch.Tensor:
+        out = 0
+        for k in range(signal_chunk.shape[1]):
+            s = signal_chunk[:, k, :, :]
+            k_w = kernel_chunk[:, k, :]
+            if torch.all(k_w == 0):
+                continue
+            # Direct call, no inner checkpointing
+            res = self._single_channel_row_conv(s, k_w, output_width)
+            if isinstance(out, int):
+                out = res
+            else:
+                out = out + res
+        
+        if isinstance(out, int):
+            batch_size, height, _ = signal_chunk.shape[0], signal_chunk.shape[2], signal_chunk.shape[3]
+            return signal_chunk.new_zeros(batch_size, self.out_channels, height, output_width)
         return out
 
     def _single_channel_row_conv(
@@ -667,13 +802,15 @@ class FTConv2d(Module):
         out = signal_rows.new_zeros(batch_size, self.out_channels, height, output_width)
         out_col = 0
         pass_idx = 0
+        kernel_cache: dict[tuple[int, str], torch.Tensor | bool] = {}
 
         while out_col < output_width:
             patch_start = min(pass_idx * stride, max_start)
             patch = signal_rows[..., patch_start : patch_start + self.patch_length]
             if patch.size(-1) < self.patch_length:
                 patch = F.pad(patch, (0, self.patch_length - patch.size(-1)))
-            patch_out = self._apply_patch_conv(patch, kernel)
+            patch = patch.contiguous()
+            patch_out = self._jtc_patch_conv(patch, kernel, kernel_cache)
             valid_slice = patch_out[
                 ..., self.kernel_length - 1 : self.kernel_length - 1 + self.valid_per_patch
             ]
@@ -691,58 +828,244 @@ class FTConv2d(Module):
             pass_idx += 1
         return out
 
-    def _apply_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    def _apply_patch_conv(
+        self,
+        patch: torch.Tensor,
+        kernels: torch.Tensor,
+        kernel_fft: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if self.conv_backend == "pytorch":
-            return self._pytorch_patch_conv(patch, kernel)
+            return self._pytorch_patch_conv(patch, kernels)
         if self.conv_backend == "fourier":
-            return self._fourier_patch_conv(patch, kernel)
-        if self.conv_backend == "jtc_emulation":
-            return self._jtc_patch_conv(patch, kernel)
+            return self._fourier_patch_conv(patch, kernels, kernel_fft)
+        if self.conv_backend == "jtc_fast":
+            return self._jtc_fast_patch_conv(patch, kernels, kernel_fft)
         raise RuntimeError(f"Unsupported backend {self.conv_backend}")
 
-    def _pytorch_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        batch_size, height, _ = patch.shape
-        patch_flat = patch.reshape(batch_size * height, 1, self.patch_length)
-        weight = kernel.unsqueeze(1)
+    def _pytorch_patch_conv(
+        self, patch: torch.Tensor, kernels: torch.Tensor
+    ) -> torch.Tensor:
+        batch_size, height, in_channels, _ = patch.shape
+        patch_flat = patch.reshape(batch_size * height, in_channels, self.patch_length)
         conv = F.conv1d(
             patch_flat,
-            weight,
+            kernels,
             bias=None,
             stride=1,
             padding=self.kernel_length - 1,
         )
         conv = conv.view(batch_size, height, self.out_channels, -1)
-        return conv.permute(0, 2, 1, 3)
+        return conv.permute(0, 2, 1, 3).contiguous()
 
-    def _fourier_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        batch_size, height, _ = patch.shape
-        fft_len = self.patch_length + self.kernel_length - 1
-        patch_flat = patch.reshape(batch_size * height, self.patch_length)
-        kernel_flat = torch.flip(kernel, dims=[1]).reshape(
-            self.out_channels, self.kernel_length
-        )
+    def _fourier_patch_conv(
+        self,
+        patch: torch.Tensor,
+        kernels: torch.Tensor,
+        kernel_fft: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Ideal JTC implementation (Vectorized).
+        
+        Simulates: |FFT(Signal + Kernel)|^2
+        Includes Quantization (DAC/ADC/Fourier) if configured, but NO non-linear distortions.
+        """
+        batch_size, height, in_channels, _ = patch.shape
+        out_channels = kernels.shape[0]
+        
+        # Geometry
+        lens_size = int(self.config.jtc_total_field)
+        sep = int(self.config.jtc_separation)
+        shift = self.patch_length + sep
+        
+        # 1. Prepare Inputs (With Quantization, No Distortion)
+        # (B*H, Cin, L)
+        p_flat = patch.reshape(batch_size * height, in_channels, self.patch_length)
+        
+        # Apply DAC Quantization
+        p_quant = QuantDequant_STE.apply(p_flat, self.config.dac_bits)
+        k_quant = QuantDequant_STE.apply(kernels, self.config.dac_bits)
+        
+        # 2. Place on Input Plane
+        sig_plane = F.pad(p_quant, (0, lens_size - self.patch_length))
+        sig_plane = sig_plane.unsqueeze(1) # (B*H, 1, Cin, Lens)
+        
+        k_plane = F.pad(k_quant, (0, lens_size - self.kernel_length))
+        k_plane = torch.roll(k_plane, shifts=shift, dims=-1)
+        k_plane = k_plane.unsqueeze(0) # (1, Cout, Cin, Lens)
+        
+        # 3. Combine (Interference)
+        input_plane = sig_plane + k_plane
+        
+        # 4. FFT
+        jft = torch.fft.fft(input_plane, n=lens_size, dim=-1)
+        
+        # 5. Square Law Detector (Intensity)
+        jps = torch.abs(jft) ** 2
+        
+        # Fourier Plane Quantization
+        if self.config.fourier_plane_bits is not None:
+            jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
+        
+        # 6. IFFT
+        correlation = torch.fft.ifft(jps, n=lens_size, dim=-1)
+        correlation = torch.abs(correlation) # Output intensity
+        
+        # 7. ADC Quantization (No Output Distortion)
+        correlation = QuantDequant_STE.apply(correlation, self.config.adc_bits)
+        
+        # 8. Sum over Input Channels (Incoherent Summation)
+        out_sum = correlation.sum(dim=2) # (B*H, Cout, Lens)
+        
+        # 9. Extract Valid Region and Align
+        extract_start = shift
+        valid_len = self.patch_length - self.kernel_length + 1
+        
+        indices = torch.arange(extract_start, extract_start + valid_len, device=patch.device)
+        indices = indices % lens_size
+        
+        valid_slice = out_sum[:, :, indices]
+        
+        output_aligned = F.pad(valid_slice, (self.kernel_length - 1, 0))
+        
+        output_aligned = output_aligned.view(batch_size, height, out_channels, -1)
+        return output_aligned.permute(0, 2, 1, 3).contiguous()
 
-        signal_fft = torch.fft.rfft(patch_flat, n=fft_len)
-        kernel_fft = torch.fft.rfft(kernel_flat, n=fft_len)
-        product = signal_fft.unsqueeze(1) * kernel_fft.unsqueeze(0)
-        conv = torch.fft.irfft(product, n=fft_len)
-        conv = conv.view(batch_size, height, self.out_channels, fft_len)
-        return conv.permute(0, 2, 1, 3)
-
-    def _jtc_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    def _jtc_fast_patch_conv(
+        self,
+        patch: torch.Tensor,
+        kernels: torch.Tensor,
+        kernel_fft: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Fast JTC Emulation (Vectorized).
+        
+        Simulates JTC physics (Distortions -> Input Plane -> |FFT|^2 -> IFFT -> Distortions)
+        using vectorized operations over input channels (Incoherent Summation).
+        """
         if self.jtc is None:
             self.jtc = JTC(self.config)
+
+        batch_size, height, in_channels, _ = patch.shape
+        out_channels = kernels.shape[0]
+        lens_size = int(self.config.jtc_total_field)
+        sep = int(self.config.jtc_separation)
+        shift = self.patch_length + sep
+
+        # 1. Prepare Inputs with Distortions
+        
+        # Flatten Signal for distortion
+        # (B*H, Cin, L)
+        p_flat = patch.reshape(batch_size * height, in_channels, self.patch_length)
+        # DAC + Input Distortion
+        p_quant = QuantDequant_STE.apply(p_flat, self.config.dac_bits)
+        # We can't use self.jtc.input_distortion directly on batch if it assumes specific shapes?
+        # JTC.input_distortion applies element-wise polyval. It supports any shape.
+        p_dist = self.jtc.input_distortion(p_quant)
+        
+        # Flatten Kernels for distortion
+        # (Cout, Cin, L)
+        k_flat = kernels.view(-1, self.kernel_length)
+        k_dist = self.jtc.prepare_kernel(k_flat).view(out_channels, in_channels, self.kernel_length)
+        
+        # 2. Place on Input Plane
+        sig_plane = F.pad(p_dist, (0, lens_size - self.patch_length))
+        sig_plane = sig_plane.unsqueeze(1) # (B*H, 1, Cin, Lens)
+        
+        k_plane = F.pad(k_dist, (0, lens_size - self.kernel_length))
+        k_plane = torch.roll(k_plane, shifts=shift, dims=-1)
+        k_plane = k_plane.unsqueeze(0) # (1, Cout, Cin, Lens)
+        
+        # 3. Combine
+        input_plane = sig_plane + k_plane
+        
+        # 4. FFT
+        jft = torch.fft.fft(input_plane, n=lens_size, dim=-1)
+        
+        # 5. Square Law (Intensity)
+        jps = torch.abs(jft) ** 2
+        
+        # Fourier Plane Quantization (on Intensity)
+        if self.config.fourier_plane_bits is not None:
+            # Scale to [0,1] per batch? Or assumes fixed range?
+            # Simple quantization
+            jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
+
+        # 6. IFFT
+        correlation = torch.fft.ifft(jps, n=lens_size, dim=-1)
+        correlation = torch.abs(correlation)
+        
+        # 7. Output Distortions (Before Summation or After? JTC sums intensities)
+        # In JTC class, output_distortion is applied to the result of IFFT *before* extracting?
+        # No, JTC class extracts then distorts?
+        # Actually, JTC hardware detects intensity on the camera (Output Plane).
+        # So Output Distortion (Camera non-linearity) applies to the full plane BEFORE cropping.
+        correlation = self.jtc.output_distortion(correlation)
+        
+        # 8. ADC
+        correlation = QuantDequant_STE.apply(correlation, self.config.adc_bits)
+        
+        # 9. Sum over Input Channels
+        out_sum = correlation.sum(dim=2)
+        
+        # 10. Extract and Align
+        extract_start = shift
+        valid_len = self.patch_length - self.kernel_length + 1
+        
+        indices = torch.arange(extract_start, extract_start + valid_len, device=patch.device)
+        indices = indices % lens_size
+        
+        valid_slice = out_sum[:, :, indices]
+        
+        # Pad left by K-1 to simulate PyTorch output structure
+        output_aligned = F.pad(valid_slice, (self.kernel_length - 1, 0))
+        
+        output_aligned = output_aligned.view(batch_size, height, out_channels, -1)
+        return output_aligned.permute(0, 2, 1, 3).contiguous()
+
+    def _jtc_patch_conv(
+        self,
+        patch: torch.Tensor,
+        kernel: torch.Tensor,
+        kernel_cache: Optional[dict[tuple[int, str], torch.Tensor | bool]] = None,
+    ) -> torch.Tensor:
+        if self.jtc is None:
+            self.jtc = JTC(self.config)
+        cache = kernel_cache if kernel_cache is not None else {}
         patch_4d = patch.unsqueeze(2)  # B, H, 1, W
-        kernel_pos = torch.clamp(kernel, min=0.0)
-        kernel_neg = torch.clamp(-kernel, min=0.0)
+
+        kernel_ptr = kernel.data_ptr()
+
+        def _fetch(sign: str) -> Optional[torch.Tensor]:
+            key = (kernel_ptr, sign)
+            cached = cache.get(key, None)
+            if cached is False:
+                return None
+            if isinstance(cached, torch.Tensor):
+                return cached
+            masked = (
+                torch.clamp(kernel, min=0.0)
+                if sign == "pos"
+                else torch.clamp(-kernel, min=0.0)
+            )
+            if not torch.any(masked):
+                cache[key] = False
+                return None
+            distorted = self.jtc.prepare_kernel(masked)
+            cache[key] = distorted
+            return distorted
+
+        kernel_pos = _fetch("pos")
+        kernel_neg = _fetch("neg")
 
         result_pos: Optional[torch.Tensor] = None
         result_neg: Optional[torch.Tensor] = None
 
-        if torch.any(kernel_pos):
-            result_pos = self.jtc(patch_4d, kernel_pos).permute(0, 2, 1, 3)
-        if torch.any(kernel_neg):
-            result_neg = self.jtc(patch_4d, kernel_neg).permute(0, 2, 1, 3)
+        if kernel_pos is not None:
+            result_pos = self.jtc(
+                patch_4d, kernel_pos, kernel_pre_distorted=True
+            ).permute(0, 2, 1, 3)
+        if kernel_neg is not None:
+            result_neg = self.jtc(
+                patch_4d, kernel_neg, kernel_pre_distorted=True
+            ).permute(0, 2, 1, 3)
 
         if result_pos is None and result_neg is None:
             return patch.new_zeros(

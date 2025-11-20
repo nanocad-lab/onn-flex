@@ -1,0 +1,18 @@
+# VGG19 Fourier Backend (100% Contamination / Stride Override)
+dataset: cifar10
+model_arch: ftvgg19
+conv_backend: fourier
+
+# Geometry forcing 100% contamination (overlap)
+# Input + Kernel > Lens (or close to it) with 0 separation
+jtc_total_field: 64
+input_length: 60
+kernel_length: 3
+jtc_separation: 0
+output_length: 60
+
+# Training
+batch_size: 32
+learning_rate: 0.001
+num_epochs: 1
+output_dir: runs/vgg19_fourier_contam
