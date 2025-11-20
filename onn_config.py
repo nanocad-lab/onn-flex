@@ -89,13 +89,13 @@ class AppConfig:
     override_effective_stride: Optional[int] = None
 
     # ------------------------------------------------------------------
-        # Training / model-related CLI overrides
-        # ------------------------------------------------------------------
-        num_identical_layers: int = 5
-        num_epochs: int = 20
-        pretrain_epochs: int = 0  # Number of epochs to pre-train using PyTorch backend
-        learning_rate: float = 1e-3
-        batch_size: int = 128
+    # Training / model-related CLI overrides
+    # ------------------------------------------------------------------
+    num_identical_layers: int = 5
+    num_epochs: int = 20
+    pretrain_epochs: int = 0  # Number of epochs to pre-train using PyTorch backend
+    learning_rate: float = 1e-3
+    batch_size: int = 128
     eval_only: bool = False
     pretrained_weights: str = ""
     run_pretrain_tests: bool = True

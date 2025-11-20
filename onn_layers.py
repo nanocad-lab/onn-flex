@@ -863,7 +863,7 @@ class FTConv2d(Module):
         kernels: torch.Tensor,
         kernel_fft: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Ideal JTC implementation (Vectorized).
+        """Ideal JTC implementation (Vectorized + Chunked).
         
         Simulates: |FFT(Signal + Kernel)|^2
         Includes Quantization (DAC/ADC/Fourier) if configured, but NO non-linear distortions.
@@ -876,44 +876,73 @@ class FTConv2d(Module):
         sep = int(self.config.jtc_separation)
         shift = self.patch_length + sep
         
-        # 1. Prepare Inputs (With Quantization, No Distortion)
-        # (B*H, Cin, L)
+        # 1. Prepare Inputs
         p_flat = patch.reshape(batch_size * height, in_channels, self.patch_length)
         
-        # Apply DAC Quantization
         p_quant = QuantDequant_STE.apply(p_flat, self.config.dac_bits)
         k_quant = QuantDequant_STE.apply(kernels, self.config.dac_bits)
         
-        # 2. Place on Input Plane
+        # Signal Plane: (B*H, 1, Cin, Lens)
         sig_plane = F.pad(p_quant, (0, lens_size - self.patch_length))
-        sig_plane = sig_plane.unsqueeze(1) # (B*H, 1, Cin, Lens)
+        sig_plane = sig_plane.unsqueeze(1)
         
-        k_plane = F.pad(k_quant, (0, lens_size - self.kernel_length))
-        k_plane = torch.roll(k_plane, shifts=shift, dims=-1)
-        k_plane = k_plane.unsqueeze(0) # (1, Cout, Cin, Lens)
+        # Kernel Plane: (1, Cout, Cin, Lens)
+        # Pre-process full kernel plane (padding/rolling)
+        # But we will slice it in the loop to save memory during broadcast
+        k_plane_full = F.pad(k_quant, (0, lens_size - self.kernel_length))
+        k_plane_full = torch.roll(k_plane_full, shifts=shift, dims=-1)
+        # k_plane_full is (Cout, Cin, Lens)
         
-        # 3. Combine (Interference)
-        input_plane = sig_plane + k_plane
+        # 2. Chunking Logic
+        # Limit intermediate tensor elements: (B*H) * Chunk * Cin * Lens
+        # Target ~50M elements (approx 400MB complex64) to stay well within A100 limits
+        limit_elements = 50_000_000
+        param_size = (batch_size * height) * in_channels * lens_size
+        chunk_size = max(1, limit_elements // param_size)
         
-        # 4. FFT
-        jft = torch.fft.fft(input_plane, n=lens_size, dim=-1)
+        output_chunks = []
         
-        # 5. Square Law Detector (Intensity)
-        jps = torch.abs(jft) ** 2
-        
-        # Fourier Plane Quantization
-        if self.config.fourier_plane_bits is not None:
-            jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
-        
-        # 6. IFFT
-        correlation = torch.fft.ifft(jps, n=lens_size, dim=-1)
-        correlation = torch.abs(correlation) # Output intensity
-        
-        # 7. ADC Quantization (No Output Distortion)
-        correlation = QuantDequant_STE.apply(correlation, self.config.adc_bits)
-        
-        # 8. Sum over Input Channels (Incoherent Summation)
-        out_sum = correlation.sum(dim=2) # (B*H, Cout, Lens)
+        for c_start in range(0, out_channels, chunk_size):
+            c_end = min(c_start + chunk_size, out_channels)
+            
+            # Slice Kernel Chunk: (1, Chunk, Cin, Lens)
+            k_chunk = k_plane_full[c_start:c_end].unsqueeze(0)
+            
+            def run_fourier_chunk(k_c):
+                # 3. Combine (Broadcast) -> (B*H, Chunk, Cin, Lens)
+                # Re-create input plane inside checkpoint to save memory
+                # sig_plane is captured from closure
+                input_plane = sig_plane + k_c
+                
+                # 4. FFT
+                jft = torch.fft.fft(input_plane, n=lens_size, dim=-1)
+                
+                # 5. Square Law
+                jps = torch.abs(jft) ** 2
+                
+                if self.config.fourier_plane_bits is not None:
+                    jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
+                
+                # 6. IFFT
+                correlation = torch.fft.ifft(jps, n=lens_size, dim=-1)
+                correlation = torch.abs(correlation)
+                
+                # 7. ADC
+                correlation = QuantDequant_STE.apply(correlation, self.config.adc_bits)
+                
+                # 8. Sum over Input Channels -> (B*H, Chunk, Lens)
+                return correlation.sum(dim=2)
+
+            if self.training and patch.requires_grad:
+                # Use checkpointing to drop intermediate activations
+                out_sum_chunk = checkpoint(run_fourier_chunk, k_chunk, use_reentrant=False)
+            else:
+                out_sum_chunk = run_fourier_chunk(k_chunk)
+                
+            output_chunks.append(out_sum_chunk)
+
+        # Concatenate results from all chunks
+        out_sum = torch.cat(output_chunks, dim=1) # (B*H, Cout, Lens)
         
         # 9. Extract Valid Region and Align
         extract_start = shift
@@ -925,8 +954,8 @@ class FTConv2d(Module):
         valid_slice = out_sum[:, :, indices]
         
         output_aligned = F.pad(valid_slice, (self.kernel_length - 1, 0))
-        
         output_aligned = output_aligned.view(batch_size, height, out_channels, -1)
+        
         return output_aligned.permute(0, 2, 1, 3).contiguous()
 
     def _jtc_fast_patch_conv(
@@ -935,7 +964,7 @@ class FTConv2d(Module):
         kernels: torch.Tensor,
         kernel_fft: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Fast JTC Emulation (Vectorized).
+        """Fast JTC Emulation (Vectorized + Chunked).
         
         Simulates JTC physics (Distortions -> Input Plane -> |FFT|^2 -> IFFT -> Distortions)
         using vectorized operations over input channels (Incoherent Summation).
@@ -950,62 +979,74 @@ class FTConv2d(Module):
         shift = self.patch_length + sep
 
         # 1. Prepare Inputs with Distortions
-        
-        # Flatten Signal for distortion
-        # (B*H, Cin, L)
         p_flat = patch.reshape(batch_size * height, in_channels, self.patch_length)
-        # DAC + Input Distortion
         p_quant = QuantDequant_STE.apply(p_flat, self.config.dac_bits)
-        # We can't use self.jtc.input_distortion directly on batch if it assumes specific shapes?
-        # JTC.input_distortion applies element-wise polyval. It supports any shape.
         p_dist = self.jtc.input_distortion(p_quant)
         
         # Flatten Kernels for distortion
-        # (Cout, Cin, L)
         k_flat = kernels.view(-1, self.kernel_length)
+        # Apply distortion and reshape back to (Cout, Cin, L)
         k_dist = self.jtc.prepare_kernel(k_flat).view(out_channels, in_channels, self.kernel_length)
         
-        # 2. Place on Input Plane
+        # 2. Place on Input Planes (Global Pre-calculation)
         sig_plane = F.pad(p_dist, (0, lens_size - self.patch_length))
         sig_plane = sig_plane.unsqueeze(1) # (B*H, 1, Cin, Lens)
         
-        k_plane = F.pad(k_dist, (0, lens_size - self.kernel_length))
-        k_plane = torch.roll(k_plane, shifts=shift, dims=-1)
-        k_plane = k_plane.unsqueeze(0) # (1, Cout, Cin, Lens)
+        k_plane_full = F.pad(k_dist, (0, lens_size - self.kernel_length))
+        k_plane_full = torch.roll(k_plane_full, shifts=shift, dims=-1)
+        # k_plane_full: (Cout, Cin, Lens)
         
-        # 3. Combine
-        input_plane = sig_plane + k_plane
+        # 3. Chunking Logic
+        # Limit intermediate tensor elements: (B*H) * Chunk * Cin * Lens
+        limit_elements = 50_000_000
+        param_size = (batch_size * height) * in_channels * lens_size
+        chunk_size = max(1, limit_elements // param_size)
         
-        # 4. FFT
-        jft = torch.fft.fft(input_plane, n=lens_size, dim=-1)
+        output_chunks = []
         
-        # 5. Square Law (Intensity)
-        jps = torch.abs(jft) ** 2
-        
-        # Fourier Plane Quantization (on Intensity)
-        if self.config.fourier_plane_bits is not None:
-            # Scale to [0,1] per batch? Or assumes fixed range?
-            # Simple quantization
-            jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
+        for c_start in range(0, out_channels, chunk_size):
+            c_end = min(c_start + chunk_size, out_channels)
+            
+            # Slice Kernel Chunk: (1, Chunk, Cin, Lens)
+            k_chunk = k_plane_full[c_start:c_end].unsqueeze(0)
+            
+            def run_jtc_chunk(k_c):
+                # 4. Combine
+                input_plane = sig_plane + k_c
+                
+                # 5. FFT
+                jft = torch.fft.fft(input_plane, n=lens_size, dim=-1)
+                
+                # 6. Square Law
+                jps = torch.abs(jft) ** 2
+                
+                if self.config.fourier_plane_bits is not None:
+                    jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
 
-        # 6. IFFT
-        correlation = torch.fft.ifft(jps, n=lens_size, dim=-1)
-        correlation = torch.abs(correlation)
+                # 7. IFFT
+                correlation = torch.fft.ifft(jps, n=lens_size, dim=-1)
+                correlation = torch.abs(correlation)
+                
+                # 8. Output Distortions
+                # Applied per element before summation (JTC sums intensities)
+                correlation = self.jtc.output_distortion(correlation)
+                
+                # 9. ADC
+                correlation = QuantDequant_STE.apply(correlation, self.config.adc_bits)
+                
+                # 10. Sum over Input Channels -> (B*H, Chunk, Lens)
+                return correlation.sum(dim=2)
+
+            if self.training and patch.requires_grad:
+                 out_sum_chunk = checkpoint(run_jtc_chunk, k_chunk, use_reentrant=False)
+            else:
+                 out_sum_chunk = run_jtc_chunk(k_chunk)
+
+            output_chunks.append(out_sum_chunk)
+            
+        out_sum = torch.cat(output_chunks, dim=1)
         
-        # 7. Output Distortions (Before Summation or After? JTC sums intensities)
-        # In JTC class, output_distortion is applied to the result of IFFT *before* extracting?
-        # No, JTC class extracts then distorts?
-        # Actually, JTC hardware detects intensity on the camera (Output Plane).
-        # So Output Distortion (Camera non-linearity) applies to the full plane BEFORE cropping.
-        correlation = self.jtc.output_distortion(correlation)
-        
-        # 8. ADC
-        correlation = QuantDequant_STE.apply(correlation, self.config.adc_bits)
-        
-        # 9. Sum over Input Channels
-        out_sum = correlation.sum(dim=2)
-        
-        # 10. Extract and Align
+        # 11. Extract and Align
         extract_start = shift
         valid_len = self.patch_length - self.kernel_length + 1
         

@@ -13,26 +13,26 @@ output_length: 32
 
 # Component Data (Real Distortions)
 driver_distortion_data_path: component_data/driver_sim_data.csv
-driver_distortion_strength: 1.0
+driver_distortion_strength: 0.0
 pd_tia_distortion_data_path: component_data/pd_tia_sim_data.csv
-pd_tia_distortion_strength: 1.0
+pd_tia_distortion_strength: 0.0
 pd_distortion_data_path: component_data/pd_sim_data.csv
 pd_distortion_strength: 0.0
 tia_distortion_data_path: component_data/tia_sim_data.csv
 tia_distortion_strength: 0.0
 mrm_power_data_path: component_data/mrm_pwr_w_sim_data.csv
-mrm_power_distortion_strength: 1.0
+mrm_power_distortion_strength: 0.0
 mrm_phase_data_path: component_data/mrm_phase_sim_data.csv
 mrm_phase_distortion_strength: 1.0
 
 # Quantization
-dac_bits: 4
-adc_bits: 6
-fourier_plane_bits: 6
+dac_bits: null
+adc_bits: null
+fourier_plane_bits: null
 
 # Training Schedule
 pretrain_epochs: 20
 num_epochs: 3
 learning_rate: 0.001
-batch_size: 32
+batch_size: 128
 output_dir: runs/test_vgg11_pretrain_finetune
