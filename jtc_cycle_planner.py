@@ -2,7 +2,8 @@ import argparse
 import csv
 import math
 import sys
-from typing import Iterable, Optional, Sequence
+from functools import lru_cache
+from typing import Optional, Sequence
 
 #CIFAR10 size
 HEIGHT = 32
@@ -11,6 +12,7 @@ KERNEL_HEIGHT = 3
 
 # Contamination threshold for considering outputs "clean"
 CONTAMINATION_THRESHOLD_PCT = 10.0  # 10% max autocorrelation contamination
+DEFAULT_GEOMETRY_SEARCH_LIMIT = 64
 
 
 def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: int, sep: int) -> tuple[int, int, int]:
@@ -33,13 +35,13 @@ def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: in
         return 0, 0, 0
 
     # Physics-based analysis
-    autocorr_center = lens_size // 2
+    # Autocorrelation (DC term) is centered at frequency 0
+    autocorr_center = 0
     autocorr_length = 2 * max(M, N) - 1
-    autocorr_start = autocorr_center - (autocorr_length // 2)
-    autocorr_end = autocorr_start + autocorr_length
-
+    # Autocorr region wraps around 0: [0, len//2] and [size-len//2, size]
+    
     # Extraction start (formula without +1, as analysis shows)
-    extraction_start = lens_size // 2 + sep + N // 2
+    extraction_start = (sep + N // 2) % lens_size
     total_outputs = M + N - 1
 
     # For valid convolution stitching, we only use correlation outputs [N-1, M-1]
@@ -47,22 +49,25 @@ def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: in
     valid_start_idx = N - 1
     valid_end_idx = M  # exclusive
     num_valid_outputs = M - N + 1
+    if num_valid_outputs <= 0:
+        return total_outputs, 0, 0
 
     # Check which valid outputs are clean (outside autocorr region)
     clean_valid_count = 0
+    
+    half_autocorr = autocorr_length // 2
 
     for i in range(valid_start_idx, valid_end_idx):
         idx = (extraction_start + i) % lens_size
 
-        # Distance from autocorr center
+        # Distance from autocorr center (0)
         dist_from_center = min(
-            abs(idx - autocorr_center),
-            abs(idx - autocorr_center + lens_size),
-            abs(idx - autocorr_center - lens_size)
+            idx,
+            lens_size - idx
         )
 
         # Clean if distance > half autocorr length
-        if dist_from_center > autocorr_length // 2:
+        if dist_from_center > half_autocorr:
             clean_valid_count += 1
 
     # Effective stride for stitching valid convolution:
@@ -78,9 +83,75 @@ def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: in
             effective_stride = num_valid_outputs  # Large enough to trust
     else:
         # Some contamination detected - use clean count
-        effective_stride = clean_valid_count if clean_valid_count > 0 else 0
+        effective_stride = clean_valid_count
+
+    if total_outputs > 0 and effective_stride <= 0:
+        # Degenerate-but-valid config (e.g., zero separation). Allow stride=1 so
+        # higher-level planners can still run even though performance will be poor.
+        effective_stride = 1
 
     return total_outputs, clean_valid_count, effective_stride
+
+
+@lru_cache(maxsize=1024)
+def _find_clean_geometry_cached(
+    input_len: int,
+    kernel_len: int,
+    max_lens_size: int,
+) -> Optional[tuple[int, int, int, int]]:
+    """Internal helper that performs the exhaustive geometry search."""
+
+    min_lens = max(kernel_len + input_len, 1)
+    best: Optional[tuple[int, int, int, int]] = None
+    best_stride = -1
+
+    for lens in range(min_lens, max_lens_size + 1):
+        max_sep = lens - (input_len + kernel_len)
+        if max_sep < 0:
+            continue
+        for sep in range(max_sep + 1):
+            _, clean, stride = compute_contamination_profile(
+                input_len, kernel_len, lens, sep
+            )
+            if clean <= 0:
+                continue
+            if stride > best_stride:
+                best_stride = stride
+                best = (sep, lens, clean, stride)
+    return best
+
+
+def find_clean_geometry(
+    input_len: int,
+    kernel_len: int,
+    max_lens_size: Optional[int] = None,
+) -> Optional[tuple[int, int, int, int]]:
+    """Search for a JTC geometry with non-zero clean outputs.
+
+    Args:
+        input_len: Signal length (M)
+        kernel_len: Kernel length (N)
+        max_lens_size: Optional cap for the lens size scan. When omitted,
+            DEFAULT_GEOMETRY_SEARCH_LIMIT (currently 64) is used. Pass a larger
+            value to permit bigger JTC planes or <=0 to skip searching.
+
+    Returns:
+        (sep, lens_size, clean_valid_outputs, effective_stride) for the
+        configuration that yields the highest effective stride. If multiple
+        configurations share the same stride, the first encountered (smallest
+        lens / separation) is returned.
+    """
+
+    limit = DEFAULT_GEOMETRY_SEARCH_LIMIT if max_lens_size is None else max_lens_size
+    if limit is None or limit <= 0:
+        return None
+
+    limit = int(limit)
+    return _find_clean_geometry_cached(int(input_len), int(kernel_len), limit)
+
+
+# Expose cache controls for tests/debuggers
+find_clean_geometry.cache_clear = _find_clean_geometry_cached.cache_clear  # type: ignore[attr-defined]
 
 
 def usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
@@ -140,8 +211,10 @@ def cycles_for_config(
         input_len, kernel_len, lens_size, sep
     )
 
-    if total_outputs <= 0 or effective_stride <= 0:
+    if total_outputs <= 0:
         return None
+
+    effective_stride = max(1, effective_stride)
 
     # Output dimensions for "same" convolution
     out_w = WIDTH - kernel_len + 1
@@ -160,102 +233,234 @@ def cycles_for_config(
     return passes_per_width, total_cycles, effective_stride, total_outputs
 
 
-def sweep(
-    input_lengths: Iterable[int],
-    kernel_lengths: Iterable[int],
-    lens_sizes: Iterable[int],
-    separations: Optional[Iterable[int]],
-    output_path: str,
-) -> None:
-    fieldnames = [
-        "input_length",
-        "kernel_length",
-        "lens_size",
-        "separation",
-        "delta",
-        "total_outputs",
-        "effective_stride",
-        "passes_per_width",
-        "total_cycles",
-    ]
-    rows = []
-    for lens in lens_sizes:
-        best_row = None
-        best_cycles = None
-        for kernel_len in kernel_lengths:
-            if kernel_len <= 0:
+VGG_STAGE_CHANNELS = [64, 128, 256, 512, 512]
+VGG_VARIANTS = {
+    "vgg11": [1, 1, 2, 2, 2],
+    "vgg13": [2, 2, 2, 2, 2],
+    "vgg16": [2, 2, 3, 3, 3],
+    "vgg19": [2, 2, 4, 4, 4],
+}
+VARIANT_ALIASES = {f"ft{name}": name for name in VGG_VARIANTS}
+
+
+def _normalize_variant(name: str) -> str:
+    key = name.lower()
+    if key in VGG_VARIANTS:
+        return key
+    if key in VARIANT_ALIASES:
+        return VARIANT_ALIASES[key]
+    raise ValueError(f"Unsupported VGG variant '{name}'")
+
+
+def _vgg_spatial_schedule(variant: str, input_size: int = WIDTH) -> list[int]:
+    """Return the spatial dimension for each conv layer in the specified variant."""
+    norm = _normalize_variant(variant)
+    size = input_size
+    schedule: list[int] = []
+    for convs in VGG_VARIANTS[norm]:
+        for _ in range(convs):
+            schedule.append(size)
+        size = max(1, size // 2)
+    return schedule
+
+
+def compute_vgg_forward_cycles(
+    effective_stride: int,
+    variant: str = "vgg11",
+    kernel_height: int = KERNEL_HEIGHT,
+) -> int:
+    """Aggregate FTConv row cycles across every conv in the VGG stack."""
+    if effective_stride <= 0:
+        return 0
+    total_cycles = 0
+    for spatial in _vgg_spatial_schedule(variant):
+        passes_per_width = math.ceil(spatial / effective_stride)
+        total_cycles += passes_per_width * spatial * kernel_height
+    return total_cycles
+
+
+def plan_vgg_geometry(
+    lens_size: int,
+    *,
+    variant: str = "vgg11",
+    kernel_lengths: Sequence[int] | None = None,
+    input_min: int = 3,
+    input_max: int = WIDTH,
+    separations: Optional[Sequence[int]] = None,
+) -> dict[str, int]:
+    """Find the geometry that minimizes total forward cycles for VGG on CIFAR-10."""
+    norm_variant = _normalize_variant(variant)
+    kernels = kernel_lengths or [KERNEL_HEIGHT]
+    best: Optional[dict[str, int]] = None
+
+    for kernel_len in kernels:
+        if kernel_len <= 0 or kernel_len > WIDTH:
+            continue
+        min_input = max(kernel_len, input_min)
+        max_input = min(input_max, WIDTH, lens_size - kernel_len)
+        if max_input < min_input:
+            continue
+        for input_len in range(min_input, max_input + 1):
+            max_sep = lens_size - (input_len + kernel_len)
+            if max_sep < 0:
                 continue
-            for input_len in input_lengths:
-                if input_len < kernel_len or input_len <= 0:
+            if separations is None:
+                sep_values: Sequence[int] = range(0, max_sep + 1)
+            else:
+                sep_values = [s for s in separations if 0 <= s <= max_sep]
+                if not sep_values:
                     continue
-                output_len = input_len - kernel_len + 1
-                max_sep = lens - (input_len + kernel_len)
-                if max_sep < 0:
+            for sep in sep_values:
+                total, clean, stride = compute_contamination_profile(
+                    input_len, kernel_len, lens_size, sep
+                )
+                if total <= 0:
                     continue
-                if separations is None:
-                    sep_iter: Iterable[int] = range(0, max_sep + 1)
+                eff_stride = max(1, stride)
+                cycles = compute_vgg_forward_cycles(eff_stride, variant=norm_variant)
+                candidate = {
+                    "lens_size": lens_size,
+                    "variant": norm_variant,
+                    "input_length": input_len,
+                    "kernel_length": kernel_len,
+                    "jtc_separation": sep,
+                    "total_outputs": total,
+                    "clean_outputs": clean,
+                    "effective_stride": eff_stride,
+                    "total_cycles": cycles,
+                }
+                if best is None:
+                    best = candidate
                 else:
-                    sep_iter = [s for s in separations if 0 <= s <= max_sep]
-                for sep in sep_iter:
-                    passes_cycles = cycles_for_config(input_len, kernel_len, lens, sep)
-                    if passes_cycles is None:
-                        continue
-                    passes, cycles, effective_stride, total_outputs = passes_cycles
-                    delta = sep + 0.5 * (input_len + kernel_len)
-                    row = {
-                        "input_length": input_len,
-                        "kernel_length": kernel_len,
-                        "lens_size": lens,
-                        "separation": sep,
-                        "delta": delta,
-                        "total_outputs": total_outputs,
-                        "effective_stride": effective_stride,
-                        "passes_per_width": passes,
-                        "total_cycles": cycles,
-                    }
-                    if best_cycles is None or cycles < best_cycles or (
-                        cycles == best_cycles and effective_stride > (best_row or {}).get("effective_stride", 0)
-                    ):
-                        best_cycles = cycles
-                        best_row = row
-        if best_row is None:
-            raise ValueError(f"No valid configuration found for lens size {lens}")
-        rows.append(best_row)
-    if output_path == "-":
-        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    else:
-        with open(output_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
+                    if cycles < best["total_cycles"]:
+                        best = candidate
+                    elif cycles == best["total_cycles"]:
+                        if eff_stride > best["effective_stride"]:
+                            best = candidate
+                        elif (
+                            eff_stride == best["effective_stride"]
+                            and input_len > best["input_length"]
+                        ):
+                            best = candidate
+                        elif (
+                            eff_stride == best["effective_stride"]
+                            and input_len == best["input_length"]
+                            and sep < best["jtc_separation"]
+                        ):
+                            best = candidate
+
+    if best is None:
+        raise ValueError(f"No valid geometry found for lens size {lens_size}")
+    return best
 
 
-def _expand_lengths(values: Optional[Sequence[int]], minimum: int, maximum: int) -> list[int]:
-    if values:
-        return sorted(set(int(v) for v in values if v >= minimum and v <= maximum))
-    return list(range(minimum, maximum + 1))
+def plan_vgg_for_lenses(
+    lens_sizes: Sequence[int],
+    *,
+    variant: str = "vgg11",
+    kernel_lengths: Sequence[int] | None = None,
+    input_min: int = 3,
+    input_max: int = WIDTH,
+    separations: Optional[Sequence[int]] = None,
+) -> list[dict[str, int]]:
+    results = []
+    for lens in lens_sizes:
+        results.append(
+            plan_vgg_geometry(
+                lens,
+                variant=variant,
+                kernel_lengths=kernel_lengths,
+                input_min=input_min,
+                input_max=input_max,
+                separations=separations,
+            )
+        )
+    return results
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sweep JTC lens parameters")
-    parser.add_argument("--input-lengths", type=int, nargs="+", default=list(range(3, 33)),
-                        help="Candidate input lengths (defaults to 3..32)")
-    parser.add_argument("--kernel-lengths", type=int, nargs="+", default=[3],
-                        help="Candidate kernel lengths (defaults to 3)")
-    parser.add_argument("--lens-sizes", type=int, nargs="+", default=list(range(32, 65)))
-    parser.add_argument("--separations", type=int, nargs="+", default=None,
-                        help="Candidate separations (defaults to 0..max feasible for each lens)")
-    parser.add_argument("--output", type=str, default="jtc_cycles.csv")
+    parser = argparse.ArgumentParser(
+        description="Plan VGG forward cycles for CIFAR-10 given lens constraints"
+    )
+    parser.add_argument(
+        "--lens-sizes",
+        type=int,
+        nargs="+",
+        default=[32, 48, 64, 96],
+        help="Lens sizes to evaluate",
+    )
+    parser.add_argument(
+        "--kernel-lengths",
+        type=int,
+        nargs="+",
+        default=[3],
+        help="Candidate kernel widths (default: 3)",
+    )
+    parser.add_argument(
+        "--input-min",
+        type=int,
+        default=3,
+        help="Minimum input length to consider",
+    )
+    parser.add_argument(
+        "--input-max",
+        type=int,
+        default=WIDTH,
+        help="Maximum input length to consider",
+    )
+    parser.add_argument(
+        "--separations",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Candidate separations (default: all feasible)",
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="vgg11",
+        choices=sorted(set(VGG_VARIANTS) | set(VARIANT_ALIASES)),
+        help="VGG variant to target (vgg11/13/16/19 or ft-prefixed names)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="-",
+        help="Output CSV path or '-' for stdout",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    input_lengths = _expand_lengths(args.input_lengths, 3, WIDTH)
-    kernel_lengths = _expand_lengths(args.kernel_lengths, 3, WIDTH)
-    sweep(input_lengths, kernel_lengths, args.lens_sizes, args.separations, args.output)
+    rows = plan_vgg_for_lenses(
+        args.lens_sizes,
+        variant=args.variant,
+        kernel_lengths=args.kernel_lengths,
+        input_min=args.input_min,
+        input_max=args.input_max,
+        separations=args.separations,
+    )
+    fieldnames = [
+        "lens_size",
+        "variant",
+        "input_length",
+        "kernel_length",
+        "jtc_separation",
+        "effective_stride",
+        "total_outputs",
+        "clean_outputs",
+        "total_cycles",
+    ]
+    if args.output == "-":
+        writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    else:
+        with open(args.output, "w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
     return 0
 
 

@@ -1,0 +1,24 @@
+# Test Case 2: VGG11 Fourier Backend with Quantization
+# Using optimized small geometry from cycle planner
+dataset: cifar10
+model_arch: ftvgg11
+conv_backend: fourier
+
+# Geometry (Optimized for Lens 32)
+jtc_total_field: 32
+input_length: 12
+kernel_length: 3
+jtc_separation: 8
+# Planner said effective_stride is 9. No override needed if code is correct.
+output_length: 12
+
+# Quantization ON (Ideal Transfer Functions)
+adc_bits: 6
+dac_bits: 4
+fourier_plane_bits: 6
+
+# Training
+batch_size: 32
+learning_rate: 0.001
+num_epochs: 1
+output_dir: runs/test_vgg11_fourier_quant
