@@ -97,3 +97,20 @@ def test_ftconv2d_jtc_emulation_backend_runs():
     out = layer(x)
     assert out.shape == (1, 2, 16, 16)
     assert torch.isfinite(out).all()
+
+
+def test_ftconv2d_jtc_fast_backend_runs():
+    """Ensure the fast JTC backend executes and returns finite outputs."""
+    config = _base_config("jtc_fast")
+    layer = FTConv2d(
+        in_channels=1,
+        out_channels=2,
+        kernel_size=(3, 3),
+        config=config,
+        conv_backend="jtc_fast",
+        bias=False,
+    )
+    x = torch.rand(1, 1, 16, 16)
+    out = layer(x)
+    assert out.shape == (1, 2, 16, 16)
+    assert torch.isfinite(out).all()

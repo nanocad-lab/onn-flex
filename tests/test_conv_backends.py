@@ -35,7 +35,13 @@ class TestConvBackends:
             jtc_total_field=48,
             dac_bits=4,
             adc_bits=6,
-            conv_backend="jtc_emulation",
+            conv_backend="jtc_fast",
+            driver_distortion_data_path="./component_data/driver_sim_data.csv",
+            mrm_phase_data_path="./component_data/mrm_phase_sim_data.csv",
+            mrm_power_data_path="./component_data/mrm_pwr_w_sim_data.csv",
+            pd_tia_distortion_data_path="./component_data/pd_tia_sim_data.csv",
+            pd_distortion_data_path="./component_data/pd_sim_data.csv",
+            tia_distortion_data_path="./component_data/tia_sim_data.csv",
         )
         return config
 
@@ -49,7 +55,7 @@ class TestConvBackends:
     def test_config_validation(self):
         """Test that config validation works correctly."""
         # Valid backends should work
-        for backend in ["pytorch", "fourier", "jtc_emulation"]:
+        for backend in ["pytorch", "fourier", "jtc_fast", "jtc_emulation"]:
             config = AppConfig(conv_backend=backend)
             assert config.conv_backend == backend
 
@@ -100,6 +106,23 @@ class TestConvBackends:
         assert output.shape[3] == 32  # width preserved
 
         # Check output is finite and not all zeros
+        assert torch.isfinite(output).all()
+        assert not torch.allclose(output, torch.zeros_like(output))
+
+    def test_jtc_fast_backend_output(self, base_config, test_input):
+        """Test vectorized JTC backend produces valid output."""
+        base_config.conv_backend = "jtc_fast"
+        layer = FTconvlayer(
+            in_channels=3,
+            out_channels=16,
+            config=base_config,
+            kernel_size=8,
+            batch_size=2,
+        )
+
+        output = layer(test_input)
+
+        assert output.shape == (2, 16, 32, 32)
         assert torch.isfinite(output).all()
         assert not torch.allclose(output, torch.zeros_like(output))
 
@@ -186,6 +209,27 @@ class TestConvBackends:
         assert layer.weights.grad is not None
         assert torch.isfinite(layer.weights.grad).all()
 
+    def test_gradient_flow_jtc_fast(self, base_config, test_input):
+        """Test gradients flow correctly through JTC fast backend."""
+        base_config.conv_backend = "jtc_fast"
+        layer = FTconvlayer(
+            in_channels=3,
+            out_channels=16,
+            config=base_config,
+            kernel_size=8,
+            batch_size=2,
+        )
+
+        test_input.requires_grad = True
+        output = layer(test_input)
+        loss = output.sum()
+        loss.backward()
+
+        assert test_input.grad is not None
+        assert torch.isfinite(test_input.grad).all()
+        assert layer.weights.grad is not None
+        assert torch.isfinite(layer.weights.grad).all()
+
     def test_gradient_flow_jtc_emulation(self, base_config, test_input):
         """Test gradients flow correctly through JTC emulation backend."""
         base_config.conv_backend = "jtc_emulation"
@@ -233,6 +277,10 @@ class TestConvBackends:
         base_config.conv_backend = "jtc_emulation"
         output_jtc = layer(test_input)
 
+        # Run with JTC fast
+        base_config.conv_backend = "jtc_fast"
+        output_fast = layer(test_input)
+
         # Run with Fourier
         base_config.conv_backend = "fourier"
         output_fourier = layer(test_input)
@@ -243,11 +291,17 @@ class TestConvBackends:
 
         # All outputs should be valid
         assert torch.isfinite(output_jtc).all()
+        assert torch.isfinite(output_fast).all()
         assert torch.isfinite(output_fourier).all()
         assert torch.isfinite(output_pytorch).all()
 
         # Outputs should have same shape
-        assert output_jtc.shape == output_fourier.shape == output_pytorch.shape
+        assert (
+            output_jtc.shape
+            == output_fast.shape
+            == output_fourier.shape
+            == output_pytorch.shape
+        )
 
         # Note: We don't require outputs to be identical because:
         # - JTC emulation includes hardware distortions
@@ -370,7 +424,7 @@ class TestConvBackends:
         """Test that quantization works with all backends."""
         test_input = torch.randn(2, 3, 32, 32)
 
-        for backend in ["pytorch", "fourier", "jtc_emulation"]:
+        for backend in ["pytorch", "fourier", "jtc_fast", "jtc_emulation"]:
             base_config.conv_backend = backend
             base_config.dac_bits = 4
             base_config.adc_bits = 6
@@ -419,6 +473,12 @@ def test_backend_selection_integration():
         output_length=None,
         jtc_separation=8,
         jtc_total_field=48,
+        driver_distortion_data_path="./component_data/driver_sim_data.csv",
+        mrm_phase_data_path="./component_data/mrm_phase_sim_data.csv",
+        mrm_power_data_path="./component_data/mrm_pwr_w_sim_data.csv",
+        pd_tia_distortion_data_path="./component_data/pd_tia_sim_data.csv",
+        pd_distortion_data_path="./component_data/pd_sim_data.csv",
+        tia_distortion_data_path="./component_data/tia_sim_data.csv",
     )
 
     layer = FTconvlayer(

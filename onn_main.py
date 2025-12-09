@@ -133,13 +133,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--dac-bits",
         type=int,
         default=yaml_config.dac_bits,
-        help="DAC bits for quantization",
+        help="DAC bits for quantization (use 0 to disable)",
     )
     parser.add_argument(
         "--adc-bits",
         type=int,
         default=yaml_config.adc_bits,
-        help="ADC bits for quantization",
+        help="ADC bits for quantization (use 0 to disable)",
     )
     parser.add_argument(
         "--scale-output",
@@ -314,7 +314,7 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--model-arch",
         type=str,
         default=yaml_config.model_arch,
-        choices=["fftconvnet", "ftvgg11"],
+        choices=["fftconvnet", "ftvgg11", "ftvgg3"],
         help="Model architecture to train (FFTConvNet or FTConv2d-based VGG11)",
     )
 

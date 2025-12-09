@@ -17,7 +17,7 @@ def test_config_backend_validation():
     print("Testing config backend validation...")
 
     # Test valid backends
-    for backend in ["pytorch", "fourier", "jtc_emulation"]:
+    for backend in ["pytorch", "fourier", "jtc_fast", "jtc_emulation"]:
         config = AppConfig(conv_backend=backend)
         assert config.conv_backend == backend
         print(f"  ✓ Valid backend '{backend}' accepted")
@@ -34,7 +34,7 @@ def test_config_backend_validation():
     # Test None backend (should be allowed as default)
     config = AppConfig(conv_backend=None)
     assert config.conv_backend is None
-    print("  ✓ None backend allowed (will fallback to jtc_emulation)")
+    print("  ✓ None backend allowed (will fallback to default backend from training loop)")
 
     return True
 
@@ -46,7 +46,7 @@ def test_config_defaults():
     config = AppConfig()
 
     # Check default backend
-    assert config.conv_backend == "jtc_emulation"
+    assert config.conv_backend == "jtc_fast"
     print(f"  ✓ Default backend: {config.conv_backend}")
 
     # Check that old flags don't exist
@@ -101,7 +101,7 @@ def test_backend_choices():
     """Test all three backend choices."""
     print("\nTesting all backend choices...")
 
-    backends = ["pytorch", "fourier", "jtc_emulation"]
+    backends = ["pytorch", "fourier", "jtc_fast", "jtc_emulation"]
 
     for backend in backends:
         config = AppConfig(

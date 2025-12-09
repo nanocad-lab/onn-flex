@@ -36,3 +36,6 @@ eval_only: False
 pretrained_weights: ""
 run_pretrain_tests: True
 loss: 0.96
+
+conv_backend: jtc_emulation
+model_arch: ftvgg11

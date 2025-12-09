@@ -1,4 +1,5 @@
 import math
+import warnings
 from typing import Any, Optional, Tuple
 import torch
 import torch.nn.functional as F
@@ -19,6 +20,42 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def _check_8(x: int, name: str):
     if x != 8:
         raise ValueError(f"{name} length must be 8 for this implementation. Got {x}.")
+
+
+def _apply_quantizer_by_name(
+    tensor: torch.Tensor, bits: int | None, quantizer_name: str, domain: str
+) -> torch.Tensor:
+    """Utility to apply a named quantizer with domain-aware signedness."""
+    if bits is None:
+        return tensor
+
+    signed_for_domain = domain in ("weight",)
+    is_weight_flag = domain in ("weight",)
+
+    def _ste_clipped_signed(x: torch.Tensor, b: int) -> torch.Tensor:
+        levels = 2**b
+        s = x.detach().abs().max().clamp_min(1e-6)
+        step = 2 * s / (levels - 1)
+        xq = torch.clamp(x, -s, s)
+        return torch.round(xq / step) * step
+
+    if quantizer_name == "ste_clipped":
+        if signed_for_domain:
+            return _ste_clipped_signed(tensor, int(bits))
+        return QAT_STE.apply(tensor, int(bits))
+    if quantizer_name == "ste_maxscale":
+        return QAT_STE_maxscale.apply(tensor, int(bits))
+    if quantizer_name == "ios":
+        return QAT_IOS.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
+    if quantizer_name == "mad":
+        return QAT_MAD.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
+    if quantizer_name == "mph":
+        return QAT_MPH.apply(tensor, int(bits), 1.0, bool(is_weight_flag))
+    if quantizer_name == "pwl":
+        return QAT_PWL.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
+
+    # default fallback
+    return QAT_STE.apply(tensor, int(bits))
 
 
 '''
@@ -209,7 +246,10 @@ class FTconvlayer(_ConvNd):
         )
         self.vertical = vertical
         self.hv_concat = hv_concat
-        self.PIC_CONV = JTC(config)
+        backend_for_init = (config.conv_backend or "jtc_fast")
+        self.PIC_CONV: Optional[JTC] = (
+            JTC(config) if backend_for_init in ("jtc_fast", "jtc_emulation") else None
+        )
         # Persist only the quantizer name (avoid lambdas for pickle safety)
         self.quantizer_name = (
             getattr(self.config, "quantizer", "ste_clipped") or "ste_clipped"
@@ -222,27 +262,7 @@ class FTconvlayer(_ConvNd):
         domain in {activation, weight, output, fourier} controls signedness.
         If bits is None, no quantization is applied.
         """
-        if bits is None:
-            return tensor
-
-        name = self.quantizer_name
-        signed_for_domain = domain in ("weight",)
-        is_weight_flag = domain in ("weight",)
-
-        if name == "ste_clipped":
-            return QAT_STE.apply(tensor, int(bits))
-        if name == "ste_maxscale":
-            return QAT_STE_maxscale.apply(tensor, int(bits))
-        if name == "ios":
-            return QAT_IOS.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
-        if name == "mad":
-            return QAT_MAD.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
-        if name == "mph":
-            return QAT_MPH.apply(tensor, int(bits), 1.0, bool(is_weight_flag))
-        if name == "pwl":
-            return QAT_PWL.apply(tensor, int(bits), 1.0, bool(signed_for_domain))
-        # default fallback
-        return QAT_STE.apply(tensor, int(bits))
+        return _apply_quantizer_by_name(tensor, bits, self.quantizer_name, domain)
 
     # ---------------- Internal helpers ------------------
     def _validate_backend_sizes(
@@ -261,7 +281,7 @@ class FTconvlayer(_ConvNd):
             case "pytorch":
                 # PyTorch conv2d is flexible with sizes
                 pass
-            case "fourier" | "jtc_emulation":
+            case "fourier" | "jtc_emulation" | "jtc_fast":
                 # Check that sizes match configuration
                 if x.shape[-1] != self.config.input_length:
                     raise ValueError(
@@ -283,8 +303,37 @@ class FTconvlayer(_ConvNd):
                         UserWarning
                     )
 
+    def _build_shifted_input_plane(
+        self,
+        signal: torch.Tensor,
+        kernel: torch.Tensor,
+        plane_size: int,
+        sep: int,
+    ) -> torch.Tensor:
+        """Place kernel and signal into the single JTC plane and center the pattern."""
+        batch = signal.shape[0]
+        M = signal.shape[-1]
+        N = kernel.shape[-1]
+
+        input_plane = torch.zeros(
+            batch, plane_size, dtype=torch.complex64, device=signal.device
+        )
+        input_plane[:, 0:N] = kernel
+        input_plane[:, N + sep : N + sep + M] = signal
+
+        roll_amount = (plane_size // 2) - (M + N + sep) // 2
+        return torch.roll(input_plane, shifts=roll_amount, dims=-1)
+
     def jtc_emulation_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """Full hardware JTC emulation pipeline with distortions."""
+        if self.PIC_CONV is None:
+            self.PIC_CONV = JTC(self.config)
+        return self.PIC_CONV(x, weight)
+
+    def jtc_fast_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """High-throughput JTC path (vectorized but physics-faithful via JTC core)."""
+        if self.PIC_CONV is None:
+            self.PIC_CONV = JTC(self.config)
         return self.PIC_CONV(x, weight)
 
     def pytorch_conv_forward(
@@ -331,17 +380,8 @@ class FTconvlayer(_ConvNd):
 
     def fourier_conv_forward(
         self, x: torch.Tensor, weight: torch.Tensor
-    ) -> torch.Tensor:
-        """Software JTC-style correlation via FFT with optional JPS quantization.
-
-        Implements the provided block using plane_size=config.jtc_total_field and
-        sep=config.jtc_separation, and quantizes at jps_batch if enabled.
-
-        Shapes:
-        - x: B H 1 W
-        - weight: Cout W
-        Returns: B H Cout W
-        """
+        ) -> torch.Tensor:
+        """Ideal JTC formulation: |FFT(signal + kernel plane)|^2 -> IFFT (no distortions)."""
         if x.dim() != 4 or weight.dim() != 2:
             raise ValueError("Unexpected shapes for fourier_conv_forward")
 
@@ -354,110 +394,51 @@ class FTconvlayer(_ConvNd):
             raise ValueError("Patch width must equal kernel_size for fourier path")
 
         cout = weight.shape[0]
-
-        if self.config.dac_bits is not None:
-            x = self._apply_quantizer(x, self.config.dac_bits, domain="activation")
-            weight = self._apply_quantizer(
-                weight, self.config.dac_bits, domain="weight"
-            )
-
-        # Repeat to pair each signal with each kernel (per-output channel)
-        input_full = x.repeat(1, 1, cout, 1)  # B H Cout W
-        weight_full = (
-            weight.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
-        )  # B H Cout W
-
-        # Save shapes
-        B = input_full.shape[0]
-        H = input_full.shape[1]
-        C = input_full.shape[2]
-        M = input_full.shape[-1]  # input length
-        N = weight_full.shape[-1]  # kernel length
-
-        if input_full.shape[:-1] != weight_full.shape[:-1]:
-            raise ValueError(
-                "Input signal and kernel_weights must have matching batch dimensions."
-            )
-
-        # Flatten for batch JTC processing: [B*H*C, 8]
-        batch_size_for_jtc = B * H * C
-        signal_reshaped = input_full.reshape(batch_size_for_jtc, M)
-        kernel_reshaped = weight_full.reshape(batch_size_for_jtc, N)
-
-        # Parameters from config
         plane_size = int(self.config.jtc_total_field)
         sep = int(self.config.jtc_separation)
 
-        # JTC (Joint Transform Correlator) simulation - emulating real optical physics
-        # JTC computes correlation via Joint Power Spectrum, outputs are magnitudes (always positive)
+        # Optional DAC quantization to match hardware bit depth
+        x = self._apply_quantizer(x, self.config.dac_bits, domain="activation")
+        weight = self._apply_quantizer(weight, self.config.dac_bits, domain="weight")
 
-        # Build input plane: place kernel [0:N], signal [N+sep:N+sep+M]
-        input_plane = torch.zeros(
-            batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
+        input_full = x.repeat(1, 1, cout, 1)  # B H Cout W
+        weight_full = weight.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
+
+        B = input_full.shape[0]
+        H = input_full.shape[1]
+        C = input_full.shape[2]
+        M = input_full.shape[-1]
+        N = weight_full.shape[-1]
+
+        signal_reshaped = input_full.reshape(B * H * C, M).to(torch.complex64)
+        kernel_reshaped = weight_full.reshape(B * H * C, N).to(torch.complex64)
+
+        required_size = N + sep + M
+        if required_size > plane_size:
+            warnings.warn(
+                f"JTC total field ({plane_size}) is smaller than required ({required_size}); "
+                "results may exhibit aliasing.",
+                UserWarning,
+            )
+            plane_size = required_size
+
+        plane = self._build_shifted_input_plane(
+            signal_reshaped, kernel_reshaped, plane_size=plane_size, sep=sep
         )
 
-        kernel_complex = kernel_reshaped.to(torch.complex64)
-        signal_complex = signal_reshaped.to(torch.complex64)
-
-        kernel_start = 0
-        kernel_end = kernel_start + N
-        signal_start = kernel_end + sep
-        signal_end = signal_start + M
-
-        input_plane[:, kernel_start:kernel_end] = kernel_complex
-        input_plane[:, signal_start:signal_end] = signal_complex
-
-        # Roll to center the input pattern
-        roll_amount = (plane_size // 2) - (M + signal_start) // 2
-        input_plane = torch.roll(input_plane, shifts=roll_amount, dims=-1)
-
-        # JTC physics: FFT -> fftshift -> Joint Power Spectrum (JPS)
-        jft = torch.fft.fft(input_plane, dim=-1)
-        jft_shifted = torch.fft.fftshift(jft, dim=-1)
-        jps = torch.abs(jft_shifted) ** 2
-        jps = jps / plane_size
-
-        # Quantize at JPS if enabled (Fourier plane quantization)
+        jft = torch.fft.fftshift(torch.fft.fft(plane, dim=-1), dim=-1)
+        jps = torch.abs(jft) ** 2 / plane_size
         if self.config.fourier_plane_bits is not None:
-            jps = self._apply_quantizer(
-                jps, self.config.fourier_plane_bits, domain="fourier"
-            )
+            jps = self._apply_quantizer(jps, self.config.fourier_plane_bits, domain="fourier")
+        corr_plane = torch.fft.ifft(torch.fft.ifftshift(jps, dim=-1), dim=-1).real
 
-        # Back to output plane: FFT -> fftshift -> magnitude
-        # Output is magnitude (light intensity), always positive
-        output_plane_fft = torch.fft.fft(jps, dim=-1)
-        output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
-        output_plane_abs = torch.abs(output_plane_shifted)
-
-        # Extract correlation output
-        # Formula: same_start = plane_size//2 + sep + N//2
-        # Note: Original formula had +1, but empirical analysis shows it should be removed
-        same_start = plane_size // 2 + sep + N // 2
-
-        # Extract full correlation (M+N-1 outputs) if config allows
-        # For properly sized planes with adequate separation, full correlation is overlap-free
-        if self.config.output_length is not None:
-            output_length = self.config.output_length
-        else:
-            # Default: extract full correlation length (M+N-1)
-            output_length = M + N - 1
-
-        # Extract indices, wrapping around plane_size
+        output_length = self.config.output_length or (M + N - 1)
+        start = plane_size // 2 + sep + N // 2
         output_indices = torch.arange(
-            same_start,
-            same_start + output_length,
-            device=x.device
+            start, start + output_length, device=x.device
         ) % plane_size
 
-        convolution_output_batched = output_plane_abs[:, output_indices]
-
-        # Reshape back to B H Cout output_length
-        out = convolution_output_batched.reshape(B, H, C, output_length)
-
-        # Optional output scaling then ADC quantization
-        max_val = out.max()
-        if self.config.scale_output == "adc" and max_val.item() > 0:
-            out = out / max_val
+        out = corr_plane[:, output_indices].reshape(B, H, C, output_length)
 
         if self.config.adc_bits is not None:
             out = self._apply_quantizer(out, self.config.adc_bits, domain="output")
@@ -484,7 +465,7 @@ class FTconvlayer(_ConvNd):
                 patch = x_c[..., patch_size * i_p : patch_size * i_p + patch_size]
 
                 # Select backend based on conv_backend parameter
-                backend = self.config.conv_backend or "jtc_emulation"
+                backend = self.config.conv_backend or "jtc_fast"
 
                 # Validate sizes for the selected backend
                 self._validate_backend_sizes(patch, weight_c, backend)
@@ -493,6 +474,10 @@ class FTconvlayer(_ConvNd):
                 match backend:
                     case "pytorch":
                         system_out = self.pytorch_conv_forward(patch, weight_c).permute(
+                            0, 2, 3, 1
+                        )
+                    case "jtc_fast":
+                        system_out = self.jtc_fast_forward(patch, weight_c).permute(
                             0, 2, 3, 1
                         )
                     case "fourier":
@@ -506,11 +491,19 @@ class FTconvlayer(_ConvNd):
                     case _:
                         raise ValueError(
                             f"Unknown conv_backend: {backend}. "
-                            f"Must be one of: 'pytorch', 'fourier', 'jtc_emulation'"
+                            f"Must be one of: 'pytorch', 'fourier', 'jtc_fast', 'jtc_emulation'"
                         )
                 # Get the actual output length
                 actual_out_len = system_out.shape[2]
-                output[:, c_out_start:c_out_end, patch_size * i_p : patch_size * i_p + actual_out_len, :] += system_out
+                usable_len = min(actual_out_len, patch_size)
+                if usable_len < actual_out_len:
+                    system_out = system_out[:, :, :usable_len, :]
+                output[
+                    :,
+                    c_out_start:c_out_end,
+                    patch_size * i_p : patch_size * i_p + usable_len,
+                    :,
+                ] += system_out
         return output
 
     def pseudo_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -567,12 +560,13 @@ class FTConv2d(Module):
         self.kernel_size = (k_h, k_w)
         self.config = config
         self.conv_backend = conv_backend or config.conv_backend or "pytorch"
-        if self.conv_backend not in ("pytorch", "fourier", "jtc_emulation"):
+        if self.conv_backend not in ("pytorch", "fourier", "jtc_fast", "jtc_emulation"):
             raise ValueError(
-                "FTConv2d backend must be 'pytorch', 'fourier', or 'jtc_emulation', "
+                "FTConv2d backend must be 'pytorch', 'fourier', 'jtc_fast', or 'jtc_emulation', "
                 f"got {self.conv_backend}"
             )
 
+        self.quantizer_name = getattr(config, "quantizer", "ste_clipped") or "ste_clipped"
         self.patch_length = int(config.input_length)
         self.kernel_length = int(config.kernel_length)
         if self.kernel_length != k_w:
@@ -612,7 +606,9 @@ class FTConv2d(Module):
             self.register_parameter("bias", None)
         self.reset_parameters()
 
-        self.jtc: Optional[JTC] = JTC(config) if self.conv_backend == "jtc_emulation" else None
+        self.jtc: Optional[JTC] = (
+            JTC(config) if self.conv_backend in ("jtc_emulation", "jtc_fast") else None
+        )
 
     def reset_parameters(self) -> None:
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -696,6 +692,8 @@ class FTConv2d(Module):
             return self._pytorch_patch_conv(patch, kernel)
         if self.conv_backend == "fourier":
             return self._fourier_patch_conv(patch, kernel)
+        if self.conv_backend == "jtc_fast":
+            return self._jtc_fast_patch_conv(patch, kernel)
         if self.conv_backend == "jtc_emulation":
             return self._jtc_patch_conv(patch, kernel)
         raise RuntimeError(f"Unsupported backend {self.conv_backend}")
@@ -714,20 +712,117 @@ class FTConv2d(Module):
         conv = conv.view(batch_size, height, self.out_channels, -1)
         return conv.permute(0, 2, 1, 3)
 
-    def _fourier_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    def _jtc_vectorized_patch_conv(
+        self,
+        patch: torch.Tensor,
+        kernel: torch.Tensor,
+        *,
+        apply_distortions: bool,
+        apply_quantization: bool,
+        use_cross_spectrum: bool = False,
+    ) -> torch.Tensor:
         batch_size, height, _ = patch.shape
-        fft_len = self.patch_length + self.kernel_length - 1
-        patch_flat = patch.reshape(batch_size * height, self.patch_length)
-        kernel_flat = torch.flip(kernel, dims=[1]).reshape(
-            self.out_channels, self.kernel_length
+        cout = kernel.shape[0]
+        plane_size = int(self.config.jtc_total_field)
+        sep = int(self.config.jtc_separation)
+
+        patch_full = patch.unsqueeze(2).repeat(1, 1, cout, 1)  # B H Cout M
+        kernel_full = kernel.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
+
+        BHC = batch_size * height * cout
+        M = patch_full.shape[-1]
+        N = kernel_full.shape[-1]
+
+        signal = patch_full.reshape(BHC, M)
+        kernel_r = kernel_full.reshape(BHC, N)
+
+        quant_fn = lambda t, b, d: _apply_quantizer_by_name(
+            t, b, self.quantizer_name, d
         )
 
-        signal_fft = torch.fft.rfft(patch_flat, n=fft_len)
-        kernel_fft = torch.fft.rfft(kernel_flat, n=fft_len)
-        product = signal_fft.unsqueeze(1) * kernel_fft.unsqueeze(0)
-        conv = torch.fft.irfft(product, n=fft_len)
-        conv = conv.view(batch_size, height, self.out_channels, fft_len)
-        return conv.permute(0, 2, 1, 3)
+        if apply_quantization and self.config.dac_bits is not None:
+            signal = quant_fn(signal, self.config.dac_bits, "activation")
+            kernel_r = quant_fn(kernel_r, self.config.dac_bits, "weight")
+
+        if apply_distortions:
+            if self.jtc is None:
+                self.jtc = JTC(self.config)
+            signal = self.jtc.mrm(self.jtc.driver(signal))
+            kernel_r = self.jtc.mrm(self.jtc.driver(kernel_r))
+        else:
+            signal = signal.to(torch.complex64)
+            kernel_r = kernel_r.to(torch.complex64)
+
+        if use_cross_spectrum:
+            signal_plane = torch.zeros(
+                BHC, plane_size, dtype=torch.complex64, device=patch.device
+            )
+            kernel_plane = torch.zeros_like(signal_plane)
+            kernel_plane[:, :N] = kernel_r
+            signal_plane[:, N + sep : N + sep + M] = signal
+
+            signal_fft = torch.fft.fft(signal_plane, dim=-1)
+            kernel_fft = torch.fft.fft(kernel_plane, dim=-1)
+            cross_spectrum = signal_fft * torch.conj(kernel_fft)
+            corr_plane = torch.fft.ifft(cross_spectrum, dim=-1).real
+        else:
+            plane = torch.zeros(BHC, plane_size, dtype=torch.complex64, device=patch.device)
+            plane[:, :N] = kernel_r
+            plane[:, N + sep : N + sep + M] = signal
+            plane = torch.roll(
+                plane, shifts=(plane_size // 2) - (M + N + sep) // 2, dims=-1
+            )
+
+            freq = torch.fft.fft(plane, dim=-1)
+            freq = torch.fft.fftshift(freq, dim=-1)
+            jps = torch.abs(freq) ** 2 / plane_size
+
+            if apply_quantization and self.config.fourier_plane_bits is not None:
+                jps = quant_fn(jps, self.config.fourier_plane_bits, "fourier")
+
+            corr_plane = torch.fft.ifft(torch.fft.ifftshift(jps, dim=-1), dim=-1).real
+
+        if apply_distortions:
+            corr_plane = corr_plane * float(self.config.loss)
+            if self.config.scale_output == "pd":
+                corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5)
+            corr_plane = self.jtc.pd(corr_plane)
+            corr_plane = self.jtc.tia(corr_plane)
+            if self.config.scale_output == "adc":
+                corr_plane = corr_plane / corr_plane.max(dim=-1, keepdim=True).values.clamp_min(1e-12)
+        elif apply_quantization:
+            # Even in ideal mode, preserve optional loss scaling before ADC quant if requested
+            corr_plane = corr_plane * float(self.config.loss)
+
+        if apply_quantization and self.config.adc_bits is not None:
+            corr_plane = quant_fn(corr_plane, self.config.adc_bits, "output")
+
+        output_length = self.config.output_length or (M + N - 1)
+        same_start = sep + 1 if use_cross_spectrum else plane_size // 2 + sep + N // 2
+        idx = torch.arange(
+            same_start, same_start + output_length, device=patch.device
+        ) % plane_size
+
+        out = corr_plane[:, idx].reshape(batch_size, height, cout, output_length)
+        return out.permute(0, 2, 1, 3)
+
+    def _fourier_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        return self._jtc_vectorized_patch_conv(
+            patch,
+            kernel,
+            apply_distortions=False,
+            apply_quantization=False,
+            use_cross_spectrum=True,
+        )
+
+    def _jtc_fast_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        return self._jtc_vectorized_patch_conv(
+            patch,
+            kernel,
+            apply_distortions=True,
+            apply_quantization=True,
+            use_cross_spectrum=False,
+        )
 
     def _jtc_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         if self.jtc is None:

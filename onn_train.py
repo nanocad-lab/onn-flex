@@ -246,6 +246,45 @@ class FTVGG11(nn.Module):
         return x
 
 
+class FTVGG3(nn.Module):
+    """Lightweight 3-block VGG-style network for quick experiments."""
+
+    def __init__(self, config: AppConfig, in_channels: int = 3, num_classes: int = 10):
+        super().__init__()
+        self.config = config
+        self.features = nn.Sequential(
+            self._conv_block(in_channels, 32),
+            nn.MaxPool2d(2),
+            self._conv_block(32, 64),
+            nn.MaxPool2d(2),
+            self._conv_block(64, 128),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128, num_classes),
+        )
+
+    def _conv_block(self, in_channels: int, out_channels: int) -> nn.Sequential:
+        return nn.Sequential(
+            FTConv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=3,
+                config=self.config,
+                conv_backend=self.config.conv_backend,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
 def create_model(
     config: AppConfig, in_channels: int, num_classes: int
 ) -> nn.Module:
@@ -255,6 +294,8 @@ def create_model(
         return FFTConvNet(config, in_channels, num_classes)
     if arch == "ftvgg11":
         return FTVGG11(config, in_channels, num_classes)
+    if arch == "ftvgg3":
+        return FTVGG3(config, in_channels, num_classes)
     raise ValueError(f"Unsupported model_arch '{config.model_arch}'")
 
 
@@ -346,6 +387,9 @@ def train_onn_model(config: AppConfig) -> float:
     Returns the final test accuracy (percent) for training or eval-only runs.
     """
 
+    # Ensure output directory exists for checkpoints / artifacts
+    os.makedirs(config.output_dir, exist_ok=True)
+
     # -------------------------------------------------------------
     #  Pre-training diagnostics (plots & quick sanity checks)
     # -------------------------------------------------------------
@@ -403,6 +447,8 @@ def train_onn_model(config: AppConfig) -> float:
 
     best_acc = 0.0
     scaler = GradScaler() if device.type == "cuda" else None
+    checkpoint_dir = os.path.join(config.output_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     last_epoch_test_acc = 0.0
     for epoch in range(config.num_epochs):
@@ -448,6 +494,9 @@ def train_onn_model(config: AppConfig) -> float:
                 "loss": f"{running_loss / len(trainloader):.3f}",
             }
         )
+        # Save per-epoch checkpoint for recovery and analysis
+        epoch_ckpt = os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth")
+        save_checkpoint(model, config, best_acc, epoch_ckpt)
 
     distortion_acc = None
     if DISTORTION_STRENGTH_FIELDS:
