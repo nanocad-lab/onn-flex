@@ -10,9 +10,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.distributed as dist
 import torchvision
 import torchvision.transforms as transforms
 from torch.amp import autocast, GradScaler
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    StateDictType,
+    FullStateDictConfig,
+)
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from onn_layers import FTconvlayer, FTConv2d
@@ -26,6 +33,47 @@ DISTORTION_STRENGTH_FIELDS = [
 ]
 
 
+def _is_distributed_and_initialized() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _is_main_process() -> bool:
+    return not _is_distributed_and_initialized() or dist.get_rank() == 0
+
+
+def _broadcast_object(obj, src: int = 0):
+    """Broadcast a Python object from src to all ranks."""
+    if not _is_distributed_and_initialized():
+        return obj
+    obj_list = [obj]
+    dist.broadcast_object_list(obj_list, src=src)
+    return obj_list[0]
+
+
+def _init_distributed_if_needed(config: AppConfig) -> Tuple[torch.device, int, int]:
+    """Initialize torch.distributed when FSDP is enabled."""
+    if not config.enable_fsdp:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return device, 0, 1
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("FSDP requires CUDA devices; disable --enable-fsdp or use GPUs.")
+
+    if not dist.is_initialized():
+        try:
+            dist.init_process_group(backend="nccl")
+        except Exception as e:  # pragma: no cover - init errors are environment-specific
+            raise RuntimeError(
+                "Failed to initialize torch.distributed. "
+                "Launch with torchrun --nproc_per_node 4 ... or disable --enable-fsdp."
+            ) from e
+
+    local_rank = int(os.environ.get("LOCAL_RANK", dist.get_rank()))
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    return device, dist.get_rank(), dist.get_world_size()
+
+
 # -------------------------------
 #  Utility helpers
 # -------------------------------
@@ -35,6 +83,7 @@ def get_data_loaders(
     batch_size: int,
     dataset: str = "cifar10",
     return_meta: bool = False,
+    distributed: bool = False,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader] | Tuple[
     torch.utils.data.DataLoader, torch.utils.data.DataLoader, int, int
 ]:
@@ -47,47 +96,67 @@ def get_data_loaders(
     """
 
     dataset = dataset.lower()
-    if dataset == "cifar10":
-        train_transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
-                transforms.ToTensor(),
-            ]
-        )
-        test_transform = transforms.Compose([transforms.ToTensor()])
-        trainset = torchvision.datasets.CIFAR10(
-            root="./data", train=True, download=True, transform=train_transform
-        )
-        testset = torchvision.datasets.CIFAR10(
-            root="./data", train=False, download=True, transform=test_transform
-        )
-        in_channels = 3
-        num_classes = 10
-    elif dataset == "mnist":
-        train_transform = transforms.Compose(
-            [
-                transforms.RandomRotation(10),
-                transforms.Resize(32),
-                transforms.ToTensor(),
-            ]
-        )
-        test_transform = transforms.Compose(
-            [
-                transforms.Resize(32),
-                transforms.ToTensor(),
-            ]
-        )
-        trainset = torchvision.datasets.MNIST(
-            root="./data", train=True, download=True, transform=train_transform
-        )
-        testset = torchvision.datasets.MNIST(
-            root="./data", train=False, download=True, transform=test_transform
-        )
-        in_channels = 1
-        num_classes = 10
-    else:
+    def _build_dataset(download_flag: bool):
+        if dataset == "cifar10":
+            train_transform = transforms.Compose(
+                [
+                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
+                    transforms.ToTensor(),
+                ]
+            )
+            test_transform = transforms.Compose([transforms.ToTensor()])
+            train_ds = torchvision.datasets.CIFAR10(
+                root="./data",
+                train=True,
+                download=download_flag,
+                transform=train_transform,
+            )
+            test_ds = torchvision.datasets.CIFAR10(
+                root="./data",
+                train=False,
+                download=download_flag,
+                transform=test_transform,
+            )
+            return train_ds, test_ds, 3, 10
+        if dataset == "mnist":
+            train_transform = transforms.Compose(
+                [
+                    transforms.RandomRotation(10),
+                    transforms.Resize(32),
+                    transforms.ToTensor(),
+                ]
+            )
+            test_transform = transforms.Compose(
+                [
+                    transforms.Resize(32),
+                    transforms.ToTensor(),
+                ]
+            )
+            train_ds = torchvision.datasets.MNIST(
+                root="./data",
+                train=True,
+                download=download_flag,
+                transform=train_transform,
+            )
+            test_ds = torchvision.datasets.MNIST(
+                root="./data",
+                train=False,
+                download=download_flag,
+                transform=test_transform,
+            )
+            return train_ds, test_ds, 1, 10
         raise ValueError(f"Unsupported dataset '{dataset}'.")
+
+    if distributed and _is_distributed_and_initialized():
+        if _is_main_process():
+            trainset, testset, in_channels, num_classes = _build_dataset(True)
+            dist.barrier()
+        else:
+            dist.barrier()
+            trainset, testset, in_channels, num_classes = _build_dataset(False)
+    else:
+        trainset, testset, in_channels, num_classes = _build_dataset(True)
 
     common_loader_kwargs = dict(
         num_workers=8,
@@ -95,11 +164,21 @@ def get_data_loaders(
         persistent_workers=True,
         prefetch_factor=2,
     )
+    train_sampler = DistributedSampler(trainset) if distributed else None
+    test_sampler = DistributedSampler(testset, shuffle=False) if distributed else None
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, **common_loader_kwargs
+        trainset,
+        batch_size=batch_size,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
+        **common_loader_kwargs,
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch_size, shuffle=False, **common_loader_kwargs
+        testset,
+        batch_size=batch_size,
+        shuffle=False if test_sampler is None else False,
+        sampler=test_sampler,
+        **common_loader_kwargs,
     )
 
     if return_meta:
@@ -305,7 +384,10 @@ def create_model(
 
 
 def evaluate(
-    model: nn.Module, dataloader: torch.utils.data.DataLoader, device: torch.device
+    model: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    distributed: bool = False,
 ) -> float:
     model.eval()
     correct = 0
@@ -320,8 +402,15 @@ def evaluate(
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    acc = 100 * correct / total
-    print(f"Accuracy: {acc:.3f}%")
+    correct_t = torch.tensor(correct, device=device)
+    total_t = torch.tensor(total, device=device)
+    if distributed and _is_distributed_and_initialized():
+        dist.all_reduce(correct_t, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_t, op=dist.ReduceOp.SUM)
+    total_val = max(total_t.item(), 1e-12)
+    acc = 100 * correct_t.item() / total_val
+    if _is_main_process():
+        print(f"Accuracy: {acc:.3f}%")
     return acc
 
 
@@ -333,6 +422,10 @@ def run_full_strength_inference(
     in_channels: int,
     num_classes: int,
 ) -> float:
+    if _is_distributed_and_initialized() and not _is_main_process():
+        # Skip auxiliary inference on non-main ranks
+        return float("nan")
+
     if not DISTORTION_STRENGTH_FIELDS:
         return float("nan")
 
@@ -341,13 +434,34 @@ def run_full_strength_inference(
         setattr(distortion_config, field, 1.0)
 
     ref_model = create_model(distortion_config, in_channels, num_classes).to(device)
-    ref_model.load_state_dict(model.state_dict())
+    if isinstance(model, FSDP):
+        full_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, full_cfg):
+            state_dict = model.state_dict()
+        ref_model.load_state_dict(state_dict)
+    else:
+        ref_model.load_state_dict(model.state_dict())
 
     try:
         print(
             "[INFO] Running inference with all distortion strength parameters set to 1.0"
         )
-        acc = evaluate(ref_model, dataloader, device)
+        eval_loader = dataloader
+        if isinstance(dataloader.sampler, DistributedSampler):
+            loader_kwargs = dict(
+                batch_size=dataloader.batch_size,
+                shuffle=False,
+                num_workers=dataloader.num_workers,
+                pin_memory=dataloader.pin_memory,
+            )
+            if dataloader.num_workers > 0:
+                loader_kwargs["prefetch_factor"] = dataloader.prefetch_factor
+                loader_kwargs["persistent_workers"] = dataloader.persistent_workers
+            eval_loader = torch.utils.data.DataLoader(
+                dataloader.dataset,
+                **loader_kwargs,
+            )
+        acc = evaluate(ref_model, eval_loader, device, distributed=False)
     finally:
         if device.type == "cuda":
             ref_model.to("cpu")
@@ -360,15 +474,52 @@ def save_checkpoint(
     model: nn.Module, config: AppConfig, best_acc: float, filename: str
 ) -> None:
     """Save model state dict together with the config and accuracy."""
+    if not _is_main_process():
+        return
+
     os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+    if isinstance(model, FSDP):
+        full_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, full_cfg):
+            state_dict = model.state_dict()
+    else:
+        state_dict = model.state_dict()
+
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": state_dict,
             "best_accuracy": best_acc,
             "config": vars(config),
         },
         filename,
     )
+
+
+def load_weights_into_model(
+    model: nn.Module, weights_path: str, device: torch.device
+):
+    """Load weights into (possibly FSDP) model and broadcast when distributed."""
+    distributed = _is_distributed_and_initialized()
+
+    checkpoint = None
+    if distributed:
+        if _is_main_process():
+            checkpoint = torch.load(weights_path, map_location="cpu", weights_only=False)
+        checkpoint = _broadcast_object(checkpoint, src=0)
+    else:
+        checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+    if isinstance(model, FSDP):
+        full_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, full_cfg):
+            model.load_state_dict(state_dict)
+    else:
+        model.load_state_dict(state_dict)
+
+    return checkpoint
 
 
 # -------------------------------
@@ -390,16 +541,22 @@ def train_onn_model(config: AppConfig) -> float:
     # Ensure output directory exists for checkpoints / artifacts
     os.makedirs(config.output_dir, exist_ok=True)
 
+    # Initialize distributed (FSDP) if requested
+    device, rank, world_size = _init_distributed_if_needed(config)
+    distributed_training = config.enable_fsdp and _is_distributed_and_initialized()
+
     # -------------------------------------------------------------
     #  Pre-training diagnostics (plots & quick sanity checks)
     # -------------------------------------------------------------
     if config.run_pretrain_tests or config.pretrain_tests_only:
-        run_pretrain_tests(config)
+        if _is_main_process():
+            run_pretrain_tests(config)
+        if distributed_training:
+            dist.barrier()
         if config.pretrain_tests_only:
-            print("[INFO] Pretrain tests only requested; exiting without training.")
+            if _is_main_process():
+                print("[INFO] Pretrain tests only requested; exiting without training.")
             return float("nan")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Build dataset loaders and retrieve dataset metadata
     (
@@ -408,20 +565,23 @@ def train_onn_model(config: AppConfig) -> float:
         in_channels,
         num_classes,
     ) = get_data_loaders(
-        config.batch_size, dataset=config.dataset, return_meta=True
+        config.batch_size,
+        dataset=config.dataset,
+        return_meta=True,
+        distributed=distributed_training,
     )
 
     # Build model
     model = create_model(config, in_channels, num_classes).to(device)
+    if config.enable_fsdp:
+        model = FSDP(model, device_id=device)
+        if _is_main_process():
+            print(f"[INFO] FSDP enabled (world_size={world_size}, device={device}).")
 
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:
         try:
-            ckpt = torch.load(
-                config.pretrained_weights, map_location=device, weights_only=False
-            )
-            state_dict = ckpt.get("model_state_dict", ckpt)
-            model.load_state_dict(state_dict)
+            load_weights_into_model(model, config.pretrained_weights, device)
             print(
                 f"[INFO] Loaded pretrained weights for fine-tuning: {config.pretrained_weights}"
             )
@@ -434,10 +594,10 @@ def train_onn_model(config: AppConfig) -> float:
     if config.eval_only:
         if not config.pretrained_weights:
             raise ValueError("--eval-only set but --pretrained-weights not provided")
-        ckpt = torch.load(config.pretrained_weights, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        test_acc = evaluate(model, testloader, device)
-        print(f"Test accuracy: {test_acc:.2f}%")
+        ckpt = load_weights_into_model(model, config.pretrained_weights, device)
+        test_acc = evaluate(model, testloader, device, distributed=distributed_training)
+        if _is_main_process():
+            print(f"Test accuracy: {test_acc:.2f}%")
         return test_acc
 
     # ---------------- Training path -----------------------
@@ -453,8 +613,16 @@ def train_onn_model(config: AppConfig) -> float:
     last_epoch_test_acc = 0.0
     for epoch in range(config.num_epochs):
         model.train()
+        if isinstance(trainloader.sampler, DistributedSampler):
+            trainloader.sampler.set_epoch(epoch)
+        if isinstance(testloader.sampler, DistributedSampler):
+            testloader.sampler.set_epoch(epoch)
         running_loss = 0.0
-        pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{config.num_epochs - 1}")
+        pbar = (
+            tqdm(trainloader, desc=f"Epoch {epoch}/{config.num_epochs - 1}")
+            if _is_main_process()
+            else trainloader
+        )
         for inputs, labels in pbar:
             inputs, labels = (
                 inputs.to(device, non_blocking=True),
@@ -476,24 +644,28 @@ def train_onn_model(config: AppConfig) -> float:
                 optimizer.zero_grad()
 
             running_loss += loss.item()
-            pbar.set_postfix({"loss": f"{loss.item():.3f}"})
+            if _is_main_process() and hasattr(pbar, "set_postfix"):
+                pbar.set_postfix({"loss": f"{loss.item():.3f}"})
 
         scheduler.step()
 
         # Evaluate
-        test_acc = evaluate(model, testloader, device)
+        test_acc = evaluate(model, testloader, device, distributed=distributed_training)
         last_epoch_test_acc = test_acc
-        train_acc = evaluate(model, trainloader, device)
-        best_acc = max(best_acc, test_acc)
-        print(
-            {
-                "epoch": epoch,
-                "train_acc": f"{train_acc:.2f}",
-                "test_acc": f"{test_acc:.2f}",
-                "best_acc": f"{best_acc:.2f}",
-                "loss": f"{running_loss / len(trainloader):.3f}",
-            }
+        train_acc = evaluate(
+            model, trainloader, device, distributed=distributed_training
         )
+        best_acc = max(best_acc, test_acc)
+        if _is_main_process():
+            print(
+                {
+                    "epoch": epoch,
+                    "train_acc": f"{train_acc:.2f}",
+                    "test_acc": f"{test_acc:.2f}",
+                    "best_acc": f"{best_acc:.2f}",
+                    "loss": f"{running_loss / len(trainloader):.3f}",
+                }
+            )
         # Save per-epoch checkpoint for recovery and analysis
         epoch_ckpt = os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth")
         save_checkpoint(model, config, best_acc, epoch_ckpt)
@@ -503,21 +675,30 @@ def train_onn_model(config: AppConfig) -> float:
         distortion_acc = run_full_strength_inference(
             model, config, testloader, device, in_channels, num_classes
         )
-        print(
-            f"[INFO] Accuracy with all distortion strengths set to 1.0: {distortion_acc:.2f}%"
-        )
+        if _is_main_process():
+            print(
+                f"[INFO] Accuracy with all distortion strengths set to 1.0: {distortion_acc:.2f}%"
+            )
 
     # ---------------- Export -------------------------------
     ckpt_path = os.path.join(config.output_dir, "fftconv_checkpoint.pth")
     save_checkpoint(model, config, best_acc, ckpt_path)
-    # Save full model for structure reference (note: bigger file)
-    torch.save(model, os.path.join(config.output_dir, "fftconv_full_model.pth"))
+    # Save full model for structure reference when not sharded
+    if not isinstance(model, FSDP) and _is_main_process():
+        torch.save(model, os.path.join(config.output_dir, "fftconv_full_model.pth"))
+    elif _is_main_process():
+        print(
+            "[WARN] Skipping full-model serialization under FSDP; use checkpoints for loading weights."
+        )
 
     # Also dump the final config for completeness
-    with open(os.path.join(config.output_dir, "final_config.yaml"), "w") as f:
-        yaml.dump(vars(config), f)
+    if _is_main_process():
+        with open(os.path.join(config.output_dir, "final_config.yaml"), "w") as f:
+            yaml.dump(vars(config), f)
 
-    print(
-        f"Training finished. Last epoch test accuracy: {last_epoch_test_acc:.2f}% | Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
-    )
+        print(
+            f"Training finished. Last epoch test accuracy: {last_epoch_test_acc:.2f}% | Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
+        )
+    if distributed_training:
+        dist.barrier()
     return last_epoch_test_acc

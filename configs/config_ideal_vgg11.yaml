@@ -1,7 +1,7 @@
 adc_bits: null
 batch_size: 128
 config_file: configs/config_ftvgg11_mnist.yaml
-conv_backend: jtc_emulation
+conv_backend: jtc_fast
 conv_method: patch
 dac_bits: null
 dataset: cifar10

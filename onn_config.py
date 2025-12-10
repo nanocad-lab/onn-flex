@@ -82,6 +82,7 @@ class AppConfig:
     num_epochs: int = 20
     learning_rate: float = 1e-3
     batch_size: int = 128
+    enable_fsdp: bool = False  # Enable FSDP (single node, multi-GPU)
     eval_only: bool = False
     pretrained_weights: str = ""
     run_pretrain_tests: bool = True

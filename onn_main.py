@@ -273,10 +273,11 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--conv-backend",
         type=str,
         default=yaml_config.conv_backend,
-        choices=["pytorch", "fourier", "jtc_emulation"],
+        choices=["pytorch", "fourier", "jtc_fast", "jtc_emulation"],
         help=(
             "Convolution backend: 'pytorch' (PyTorch conv2d), "
-            "'fourier' (FFT-based software JTC), or "
+            "'fourier' (FFT-based software JTC), "
+            "'jtc_fast' (vectorized JTC with hardware distortions), or "
             "'jtc_emulation' (full hardware JTC emulation)"
         ),
     )
@@ -357,6 +358,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         type=int,
         default=yaml_config.batch_size,
         help="Training batch size",
+    )
+    parser.add_argument(
+        "--enable-fsdp",
+        dest="enable_fsdp",
+        action="store_true",
+        default=yaml_config.enable_fsdp,
+        help="Enable single-node multi-GPU training with FSDP (requires torchrun)",
     )
     parser.add_argument(
         "--eval-only",
