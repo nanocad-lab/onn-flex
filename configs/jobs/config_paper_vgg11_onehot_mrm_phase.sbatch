@@ -18,4 +18,5 @@ BATCH=24
 echo "Starting job with config=${CONFIG}"
 module load conda/25.7.0
 conda activate onn-torch
-srun python onn_main.py --config-file "${CONFIG}" --enable-fsdp --output-dir "${OUT_DIR}" --batch-size "${BATCH}"
+NPROC=${SLURM_GPUS_ON_NODE:-${SLURM_GPUS:-4}}
+srun torchrun --nproc_per_node=${NPROC} onn_main.py --config-file "${CONFIG}" --enable-fsdp --output-dir "${OUT_DIR}" --batch-size "${BATCH}"

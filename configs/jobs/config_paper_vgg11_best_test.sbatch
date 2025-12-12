@@ -3,10 +3,10 @@
 #SBATCH --partition=hpg-b200
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus=8
+#SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64gb
-#SBATCH --time=12:00:00
+#SBATCH --time=1:00:00
 #SBATCH --output=onn_%j.out
 
 set -euo pipefail
