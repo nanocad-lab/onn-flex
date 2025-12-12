@@ -38,6 +38,12 @@ python onn_main.py \
 python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/pretrain_only/ --pretrain-tests-only
 ```
 
+# Checkpointing & Resume
+- Checkpoints are saved under `OUTPUT_DIR/checkpoints/epoch_XXX.pth` and a rolling `OUTPUT_DIR/checkpoints/latest.pth`.
+- Training also writes `OUTPUT_DIR/progress.csv` with `epoch, train_acc, test_acc, best_acc, loss`.
+- Resume is automatic: if `latest.pth` exists in the chosen `--output-dir`, `onn_main.py` loads model/optimizer/scheduler/best_acc and continues from the next epoch.
+- To start fresh, point `--output-dir` to a new folder or remove `latest.pth`.
+
 # Distortion Sweep Analysis
 
 The distortion sweep script analyzes the impact of various hardware distortions on model performance, generating both accuracy and SNDR (Signal-to-Noise and Distortion Ratio) plots.

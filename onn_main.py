@@ -367,6 +367,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Enable single-node multi-GPU training with FSDP (requires torchrun)",
     )
     parser.add_argument(
+        "--enable-compile",
+        dest="enable_compile",
+        action="store_true",
+        default=yaml_config.enable_compile,
+        help="Wrap model with torch.compile for eager-mode speedups (single-node only)",
+    )
+    parser.add_argument(
         "--eval-only",
         dest="eval_only",
         action="store_true",

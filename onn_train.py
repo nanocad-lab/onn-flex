@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import os
+import csv
 import yaml
+import shutil
 from dataclasses import fields as dataclass_fields
 from typing import Tuple
 
@@ -159,7 +161,7 @@ def get_data_loaders(
         trainset, testset, in_channels, num_classes = _build_dataset(True)
 
     common_loader_kwargs = dict(
-        num_workers=8,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
@@ -471,9 +473,16 @@ def run_full_strength_inference(
 
 
 def save_checkpoint(
-    model: nn.Module, config: AppConfig, best_acc: float, filename: str
+    model: nn.Module,
+    config: AppConfig,
+    best_acc: float,
+    filename: str,
+    *,
+    epoch: int | None = None,
+    optimizer: optim.Optimizer | None = None,
+    scheduler: optim.lr_scheduler._LRScheduler | None = None,
 ) -> None:
-    """Save model state dict together with the config and accuracy."""
+    """Save model/optimizer/scheduler together with best_acc and epoch."""
     if not _is_main_process():
         return
 
@@ -486,14 +495,33 @@ def save_checkpoint(
     else:
         state_dict = model.state_dict()
 
-    torch.save(
-        {
-            "model_state_dict": state_dict,
-            "best_accuracy": best_acc,
-            "config": vars(config),
-        },
-        filename,
-    )
+    payload = {
+        "model_state_dict": state_dict,
+        "best_accuracy": best_acc,
+        "config": vars(config),
+    }
+    if epoch is not None:
+        payload["epoch"] = epoch
+    if optimizer is not None:
+        payload["optimizer_state_dict"] = optimizer.state_dict()
+    if scheduler is not None:
+        payload["scheduler_state_dict"] = scheduler.state_dict()
+
+    torch.save(payload, filename)
+
+
+def append_progress_row(progress_file: str, row: dict) -> None:
+    """Append a single progress row to CSV; create file with header if needed."""
+    if not _is_main_process():
+        return
+    os.makedirs(os.path.dirname(progress_file), exist_ok=True)
+    write_header = not os.path.exists(progress_file)
+    fieldnames = list(row.keys())
+    with open(progress_file, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def load_weights_into_model(
@@ -573,10 +601,24 @@ def train_onn_model(config: AppConfig) -> float:
 
     # Build model
     model = create_model(config, in_channels, num_classes).to(device)
+
     if config.enable_fsdp:
-        model = FSDP(model, device_id=device)
+        model = FSDP(model, device_id=device, use_orig_params=True if config.enable_compile else False)
         if _is_main_process():
             print(f"[INFO] FSDP enabled (world_size={world_size}, device={device}).")
+
+    if config.enable_compile:
+        if hasattr(torch, "compile"):
+            if config.enable_fsdp and _is_main_process():
+                print("[WARN] Using torch.compile together with FSDP is experimental; "
+                      "ensure recent PyTorch and be ready to fall back if issues arise.")
+            model = torch.compile(model)
+            if _is_main_process():
+                print("[INFO] torch.compile enabled for model.")
+        else:
+            if _is_main_process():
+                print("[WARN] torch.compile not available in this PyTorch version; continuing without it.")
+            config.enable_compile = False
 
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:
@@ -603,15 +645,41 @@ def train_onn_model(config: AppConfig) -> float:
     # ---------------- Training path -----------------------
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
 
-    best_acc = 0.0
-    scaler = GradScaler() if device.type == "cuda" else None
     checkpoint_dir = os.path.join(config.output_dir, "checkpoints")
+    progress_file = os.path.join(config.output_dir, "progress.csv")
     os.makedirs(checkpoint_dir, exist_ok=True)
+    latest_ckpt = os.path.join(checkpoint_dir, "latest.pth")
+
+    resume_epoch = 0
+    best_acc = 0.0
+    loaded_state = None
+    if not config.eval_only and os.path.exists(latest_ckpt):
+        try:
+            loaded_state = torch.load(latest_ckpt, map_location=device, weights_only=False)
+            if "model_state_dict" in loaded_state:
+                model.load_state_dict(loaded_state["model_state_dict"])
+                best_acc = float(loaded_state.get("best_accuracy", 0.0))
+                resume_epoch = int(loaded_state.get("epoch", -1)) + 1
+                if "optimizer_state_dict" in loaded_state:
+                    optimizer.load_state_dict(loaded_state["optimizer_state_dict"])
+                print(f"[INFO] Resuming from {latest_ckpt} (epoch {resume_epoch}, best_acc={best_acc:.2f})")
+        except Exception as e:  # pragma: no cover
+            print(f"[WARN] Failed to load latest checkpoint '{latest_ckpt}': {e}. Starting fresh.")
+
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.num_epochs, last_epoch=resume_epoch - 1
+    )
+    if loaded_state and "scheduler_state_dict" in loaded_state:
+        try:
+            scheduler.load_state_dict(loaded_state["scheduler_state_dict"])
+        except Exception as e:  # pragma: no cover
+            print(f"[WARN] Failed to load scheduler state: {e}")
+
+    scaler = GradScaler() if device.type == "cuda" else None
 
     last_epoch_test_acc = 0.0
-    for epoch in range(config.num_epochs):
+    for epoch in range(resume_epoch, config.num_epochs):
         model.train()
         if isinstance(trainloader.sampler, DistributedSampler):
             trainloader.sampler.set_epoch(epoch)
@@ -666,9 +734,35 @@ def train_onn_model(config: AppConfig) -> float:
                     "loss": f"{running_loss / len(trainloader):.3f}",
                 }
             )
+            append_progress_row(
+                progress_file,
+                {
+                    "epoch": epoch,
+                    "train_acc": train_acc,
+                    "test_acc": test_acc,
+                    "best_acc": best_acc,
+                    "loss": running_loss / len(trainloader),
+                },
+            )
         # Save per-epoch checkpoint for recovery and analysis
         epoch_ckpt = os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth")
-        save_checkpoint(model, config, best_acc, epoch_ckpt)
+        save_checkpoint(
+            model,
+            config,
+            best_acc,
+            epoch_ckpt,
+            epoch=epoch,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+        if _is_main_process():
+            # Update latest.pth for resume
+            try:
+                tmp_path = latest_ckpt + ".tmp"
+                shutil.copyfile(epoch_ckpt, tmp_path)
+                os.replace(tmp_path, latest_ckpt)
+            except OSError:
+                shutil.copyfile(epoch_ckpt, latest_ckpt)
 
     distortion_acc = None
     if DISTORTION_STRENGTH_FIELDS:
@@ -682,7 +776,15 @@ def train_onn_model(config: AppConfig) -> float:
 
     # ---------------- Export -------------------------------
     ckpt_path = os.path.join(config.output_dir, "fftconv_checkpoint.pth")
-    save_checkpoint(model, config, best_acc, ckpt_path)
+    save_checkpoint(
+        model,
+        config,
+        best_acc,
+        ckpt_path,
+        epoch=config.num_epochs - 1,
+        optimizer=optimizer,
+        scheduler=scheduler,
+    )
     # Save full model for structure reference when not sharded
     if not isinstance(model, FSDP) and _is_main_process():
         torch.save(model, os.path.join(config.output_dir, "fftconv_full_model.pth"))

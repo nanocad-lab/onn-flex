@@ -83,6 +83,7 @@ class AppConfig:
     learning_rate: float = 1e-3
     batch_size: int = 128
     enable_fsdp: bool = False  # Enable FSDP (single node, multi-GPU)
+    enable_compile: bool = False  # Enable torch.compile (eager)
     eval_only: bool = False
     pretrained_weights: str = ""
     run_pretrain_tests: bool = True

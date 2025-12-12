@@ -645,13 +645,16 @@ class FTConv2d(Module):
         self, rows: torch.Tensor, kernels: torch.Tensor, output_width: int
     ) -> torch.Tensor:
         batch_size, _, height, _ = rows.shape
-        out = rows.new_zeros(batch_size, self.out_channels, height, output_width)
+        out = None
         for c_in in range(self.in_channels):
             signal = rows[:, c_in, :, :]
             kernel = kernels[:, c_in, :]
             if torch.all(kernel == 0):
                 continue
-            out += self._single_channel_row_conv(signal, kernel, output_width)
+            contrib = self._single_channel_row_conv(signal, kernel, output_width)
+            out = contrib if out is None else out + contrib
+        if out is None:
+            return rows.new_zeros(batch_size, self.out_channels, height, output_width)
         return out
 
     def _single_channel_row_conv(
@@ -660,7 +663,7 @@ class FTConv2d(Module):
         batch_size, height, row_width = signal_rows.shape
         stride = max(1, min(self.effective_stride, self.valid_per_patch))
         max_start = max(row_width - self.patch_length, 0)
-        out = signal_rows.new_zeros(batch_size, self.out_channels, height, output_width)
+        out = None
         out_col = 0
         pass_idx = 0
 
@@ -680,11 +683,15 @@ class FTConv2d(Module):
                 slice_offset = 0
             if slice_offset > max_offset:
                 slice_offset = max_offset
-            out[..., out_col : out_col + usable] = valid_slice[
-                ..., slice_offset : slice_offset + usable
-            ]
+            slice_part = valid_slice[..., slice_offset : slice_offset + usable]
+            # pad along width only: (left, right, top, bottom)
+            padded = F.pad(slice_part, (out_col, output_width - out_col - usable, 0, 0))
+            out = padded if out is None else out + padded
             out_col += usable
             pass_idx += 1
+
+        if out is None:
+            return signal_rows.new_zeros(batch_size, self.out_channels, height, output_width)
         return out
 
     def _apply_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
@@ -744,7 +751,15 @@ class FTConv2d(Module):
             signal = quant_fn(signal, self.config.dac_bits, "activation")
             kernel_r = quant_fn(kernel_r, self.config.dac_bits, "weight")
 
-        if apply_distortions:
+        # Skip driver/MRM when all related strengths are zero to preserve gradient
+        apply_input_distort = apply_distortions and (
+            self.config.driver_distortion_strength > 0
+            or self.config.mrm_power_distortion_strength > 0
+            or self.config.mrm_phase_distortion_strength > 0
+            or self.config.ler_std_dev > 0
+        )
+
+        if apply_input_distort:
             if self.jtc is None:
                 self.jtc = JTC(self.config)
             signal = self.jtc.mrm(self.jtc.driver(signal))
@@ -754,21 +769,23 @@ class FTConv2d(Module):
             kernel_r = kernel_r.to(torch.complex64)
 
         if use_cross_spectrum:
-            signal_plane = torch.zeros(
-                BHC, plane_size, dtype=torch.complex64, device=patch.device
+            kernel_pad = F.pad(kernel_r, (0, plane_size - N))
+            signal_pad = F.pad(
+                signal, (N + sep, plane_size - (N + sep + M))
             )
-            kernel_plane = torch.zeros_like(signal_plane)
-            kernel_plane[:, :N] = kernel_r
-            signal_plane[:, N + sep : N + sep + M] = signal
+            kernel_plane = kernel_pad
+            signal_plane = signal_pad
 
             signal_fft = torch.fft.fft(signal_plane, dim=-1)
             kernel_fft = torch.fft.fft(kernel_plane, dim=-1)
             cross_spectrum = signal_fft * torch.conj(kernel_fft)
             corr_plane = torch.fft.ifft(cross_spectrum, dim=-1).real
         else:
-            plane = torch.zeros(BHC, plane_size, dtype=torch.complex64, device=patch.device)
-            plane[:, :N] = kernel_r
-            plane[:, N + sep : N + sep + M] = signal
+            kernel_pad = F.pad(kernel_r, (0, plane_size - N))
+            signal_pad = F.pad(
+                signal, (N + sep, plane_size - (N + sep + M))
+            )
+            plane = kernel_pad + signal_pad
             plane = torch.roll(
                 plane, shifts=(plane_size // 2) - (M + N + sep) // 2, dims=-1
             )
@@ -782,17 +799,32 @@ class FTConv2d(Module):
 
             corr_plane = torch.fft.ifft(torch.fft.ifftshift(jps, dim=-1), dim=-1).real
 
-        if apply_distortions:
+        # Decide whether to run the output distortion stack (PD / TIA / scaling).
+        apply_output_stage = apply_distortions and (
+            self.config.pd_distortion_strength > 0
+            or self.config.pd_tia_distortion_strength > 0
+            or self.config.tia_distortion_strength > 0
+            or self.config.scale_output != "none"
+        )
+
+        # Apply the optical loss multiplier whenever requested, even if we skip
+        # other distortions for the ideal path.
+        if apply_distortions or abs(float(self.config.loss) - 1.0) > 1e-6:
             corr_plane = corr_plane * float(self.config.loss)
+
+        if apply_output_stage:
+            # Keep amplitudes inside PD/TIA operating window to avoid hard clamp
             if self.config.scale_output == "pd":
+                corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5)
+            else:
                 corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5)
             corr_plane = self.jtc.pd(corr_plane)
             corr_plane = self.jtc.tia(corr_plane)
             if self.config.scale_output == "adc":
                 corr_plane = corr_plane / corr_plane.max(dim=-1, keepdim=True).values.clamp_min(1e-12)
         elif apply_quantization:
-            # Even in ideal mode, preserve optional loss scaling before ADC quant if requested
-            corr_plane = corr_plane * float(self.config.loss)
+            # Ideal/quantization-only path keeps the earlier behaviour.
+            pass
 
         if apply_quantization and self.config.adc_bits is not None:
             corr_plane = quant_fn(corr_plane, self.config.adc_bits, "output")
@@ -816,12 +848,34 @@ class FTConv2d(Module):
         )
 
     def _jtc_fast_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        # Treat the fast path as "ideal" when all distortion/quantization knobs are off.
+        distort_knobs = (
+            self.config.driver_distortion_strength,
+            self.config.mrm_power_distortion_strength,
+            self.config.mrm_phase_distortion_strength,
+            self.config.pd_distortion_strength,
+            self.config.pd_tia_distortion_strength,
+            self.config.tia_distortion_strength,
+            self.config.ler_std_dev,
+        )
+        quant_knobs = (
+            self.config.dac_bits,
+            self.config.adc_bits,
+            self.config.fourier_plane_bits,
+        )
+
+        is_ideal = (
+            all(k == 0 or k is None for k in distort_knobs)
+            and all(k is None for k in quant_knobs)
+            and (self.config.scale_output == "none")
+        )
+
         return self._jtc_vectorized_patch_conv(
             patch,
             kernel,
-            apply_distortions=True,
-            apply_quantization=True,
-            use_cross_spectrum=False,
+            apply_distortions=not is_ideal,
+            apply_quantization=not is_ideal,
+            use_cross_spectrum=is_ideal,  # match fourier path when truly ideal
         )
 
     def _jtc_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
