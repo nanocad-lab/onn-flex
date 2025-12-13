@@ -768,15 +768,7 @@ class FTConv2d(Module):
             signal = quant_fn(signal, self.config.dac_bits, "activation")
             kernel_r = quant_fn(kernel_r, self.config.dac_bits, "weight")
 
-        # Skip driver/MRM when all related strengths are zero to preserve gradient
-        apply_input_distort = apply_distortions and (
-            self.config.driver_distortion_strength > 0
-            or self.config.mrm_power_distortion_strength > 0
-            or self.config.mrm_phase_distortion_strength > 0
-            or self.config.ler_std_dev > 0
-        )
-
-        if apply_input_distort:
+        if apply_distortions:
             if self.jtc is None:
                 self.jtc = JTC(self.config)
             signal = self.jtc.mrm(self.jtc.driver(signal))
@@ -816,32 +808,18 @@ class FTConv2d(Module):
 
             corr_plane = torch.fft.ifft(torch.fft.ifftshift(jps, dim=-1), dim=-1).real
 
-        # Decide whether to run the output distortion stack (PD / TIA / scaling).
-        apply_output_stage = apply_distortions and (
-            self.config.pd_distortion_strength > 0
-            or self.config.pd_tia_distortion_strength > 0
-            or self.config.tia_distortion_strength > 0
-            or self.config.scale_output != "none"
-        )
-
         # Apply the optical loss multiplier whenever requested, even if we skip
         # other distortions for the ideal path.
         if apply_distortions or abs(float(self.config.loss) - 1.0) > 1e-6:
             corr_plane = corr_plane * float(self.config.loss)
 
-        if apply_output_stage:
+        if apply_distortions:
             # Keep amplitudes inside PD/TIA operating window to avoid hard clamp
-            if self.config.scale_output == "pd":
-                corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5)
-            else:
-                corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5)
+            corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5)
             corr_plane = self.jtc.pd(corr_plane)
             corr_plane = self.jtc.tia(corr_plane)
             if self.config.scale_output == "adc":
                 corr_plane = corr_plane / corr_plane.max(dim=-1, keepdim=True).values.clamp_min(1e-12)
-        elif apply_quantization:
-            # Ideal/quantization-only path keeps the earlier behaviour.
-            pass
 
         if apply_quantization and self.config.adc_bits is not None:
             corr_plane = quant_fn(corr_plane, self.config.adc_bits, "output")
@@ -865,35 +843,12 @@ class FTConv2d(Module):
         )
 
     def _jtc_fast_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        # Treat the fast path as "ideal" when all distortion/quantization knobs are off.
-        distort_knobs = (
-            self.config.driver_distortion_strength,
-            self.config.mrm_power_distortion_strength,
-            self.config.mrm_phase_distortion_strength,
-            self.config.pd_distortion_strength,
-            self.config.pd_tia_distortion_strength,
-            self.config.tia_distortion_strength,
-            self.config.ler_std_dev,
-        )
-        quant_knobs = (
-            self.config.dac_bits,
-            self.config.adc_bits,
-            self.config.fourier_plane_bits,
-        )
-
-        is_ideal = (
-            all(k == 0 or k is None for k in distort_knobs)
-            and all(k is None for k in quant_knobs)
-            and (self.config.scale_output == "none")
-        )
-
         def _run(p: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
             return self._jtc_vectorized_patch_conv(
                 p,
                 k,
-                apply_distortions=not is_ideal,
-                apply_quantization=not is_ideal,
-                use_cross_spectrum=is_ideal,  # match fourier path when truly ideal
+                apply_distortions=True,
+                apply_quantization=True,
             )
 
         if (
