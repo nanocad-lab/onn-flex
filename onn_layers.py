@@ -1,8 +1,10 @@
 import math
+import inspect
 import warnings
 from typing import Any, Optional, Tuple
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as _torch_checkpoint
 from torch.nn import init
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
@@ -15,6 +17,21 @@ __all__ = ["FTconvlayer", "FTConv2d"]
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+try:
+    _CHECKPOINT_SUPPORTS_KWARGS = "use_reentrant" in inspect.signature(
+        _torch_checkpoint
+    ).parameters
+except (TypeError, ValueError):  # pragma: no cover
+    _CHECKPOINT_SUPPORTS_KWARGS = False
+
+
+def _checkpoint(fn, *args: torch.Tensor) -> torch.Tensor:
+    if _CHECKPOINT_SUPPORTS_KWARGS:
+        return _torch_checkpoint(
+            fn, *args, use_reentrant=False, preserve_rng_state=True
+        )
+    return _torch_checkpoint(fn, *args)
 
 
 def _check_8(x: int, name: str):
@@ -870,13 +887,22 @@ class FTConv2d(Module):
             and (self.config.scale_output == "none")
         )
 
-        return self._jtc_vectorized_patch_conv(
-            patch,
-            kernel,
-            apply_distortions=not is_ideal,
-            apply_quantization=not is_ideal,
-            use_cross_spectrum=is_ideal,  # match fourier path when truly ideal
-        )
+        def _run(p: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+            return self._jtc_vectorized_patch_conv(
+                p,
+                k,
+                apply_distortions=not is_ideal,
+                apply_quantization=not is_ideal,
+                use_cross_spectrum=is_ideal,  # match fourier path when truly ideal
+            )
+
+        if (
+            self.training
+            and torch.is_grad_enabled()
+            and bool(getattr(self.config, "jtc_checkpoint", False))
+        ):
+            return _checkpoint(_run, patch, kernel)
+        return _run(patch, kernel)
 
     def _jtc_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         if self.jtc is None:

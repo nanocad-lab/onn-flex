@@ -287,6 +287,15 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.fourier_plane_bits,
         help="Quantization bits used in the Fourier plane",
     )
+    parser.add_argument(
+        "--jtc-checkpoint",
+        dest="jtc_checkpoint",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=yaml_config.jtc_checkpoint,
+        help="Enable activation checkpointing for the JTC fast backend (true/false)",
+    )
 
     # Quantizer selection (single)
     parser.add_argument(

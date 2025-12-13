@@ -8,6 +8,11 @@ A standard interface for modeling photonic JTC based neural networks.
 python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_ideal/ --jtc-separation 8 --jtc-total-field 48 --batch-size 128
 ```
 
+### Reduce GPU memory (activation checkpointing)
+```bash
+python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_ideal_ckpt/ --jtc-checkpoint true
+```
+
 ## Training with PyTorch Conv (Alternative to JTC)
 ```bash
 python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_pytorch/ --use-pytorch-conv --batch-size 128

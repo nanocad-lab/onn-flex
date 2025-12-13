@@ -67,6 +67,11 @@ class AppConfig:
 
     fourier_plane_bits: Optional[int] = 6  # Bits for Fourier plane quantization
 
+    # Memory / performance knobs
+    # Activation checkpointing reduces peak memory by recomputing the JTC forward
+    # during backward (helpful for jtc_fast with component nonidealities).
+    jtc_checkpoint: bool = True
+
     # Quantizer selection (single QAT block for all steps)
     # Options: 'ste_clipped', 'ste_maxscale', 'ios', 'mad', 'mph', 'pwl'
     quantizer: str = "ste_clipped"
