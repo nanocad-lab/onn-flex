@@ -43,4 +43,4 @@ scale_output: none
 tia_distortion_data_path: ./component_data/tia_sim_data.csv
 tia_distortion_polyfit_order: null
 tia_distortion_strength: 0.0
-enable_compile: true
+enable_compile: false
