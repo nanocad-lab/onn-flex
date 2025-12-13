@@ -14,7 +14,7 @@ input_length: 8
 jtc_separation: 7
 jtc_total_field: 32
 kernel_length: 3
-learning_rate: 0.01
+learning_rate: 0.001
 ler_std_dev: 0.0
 loss: 0.96
 model_arch: ftvgg11
