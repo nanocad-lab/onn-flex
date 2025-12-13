@@ -6,7 +6,7 @@
 #SBATCH --gpus=4
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64gb
-#SBATCH --time=12:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=onn_%j.out
 
 set -euo pipefail

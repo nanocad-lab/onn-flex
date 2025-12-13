@@ -25,7 +25,7 @@ mrm_power_data_path: ./component_data/mrm_pwr_w_sim_data.csv
 mrm_power_distortion_strength: 0.0
 mrm_power_polyfit_order: null
 normalize_blocks: false
-num_epochs: 30
+num_epochs: 10
 num_identical_layers: 0
 output_dir: runs/ftvgg11_cifar10
 output_length: null
