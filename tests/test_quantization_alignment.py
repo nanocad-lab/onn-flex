@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import pytest
 from onn_config import AppConfig
-from onn_layers import FTconvlayer
+from onn_layers import FTconvlayer, _apply_quantizer_by_name
 from onn_component import QuantDequant_STE, JTC
 
 
@@ -193,6 +193,18 @@ class TestQuantizationAlignment:
         assert kernel.grad is not None
         assert torch.isfinite(signal.grad).all()
         assert torch.isfinite(kernel.grad).all()
+
+    def test_ste_clipped_signed_weight_quant_has_nonzero_grad(self):
+        """ste_clipped weight quantization should not kill gradients."""
+        torch.manual_seed(0)
+        weights = torch.randn(128, requires_grad=True)
+        quantized = _apply_quantizer_by_name(weights, 4, "ste_clipped", "weight")
+        loss = quantized.sum()
+        loss.backward()
+
+        assert weights.grad is not None
+        assert torch.isfinite(weights.grad).all()
+        assert weights.grad.abs().sum() > 0
 
     def test_gradient_flow_through_fourier_plane_bits(self, base_config):
         """Test that gradients flow through fourier_plane_bits quantization."""

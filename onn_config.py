@@ -76,6 +76,13 @@ class AppConfig:
     # Options: 'ste_clipped', 'ste_maxscale', 'ios', 'mad', 'mph', 'pwl'
     quantizer: str = "ste_clipped"
 
+    # Weight encoding
+    # Many JTC / intensity-domain pipelines are unipolar (cannot represent negative
+    # weights directly). When enabled, signed weights are represented as
+    # w = w_pos - w_neg with w_pos,w_neg >= 0 and the two rails are evaluated
+    # and subtracted.
+    differential_weights: bool = True
+
     # Dataset / model selection
     dataset: str = "cifar10"  # Options: 'cifar10', 'mnist'
     model_arch: str = "fftconvnet"  # Options: 'fftconvnet', 'ftvgg11', 'ftvgg3'

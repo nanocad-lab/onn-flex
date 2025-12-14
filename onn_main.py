@@ -313,6 +313,20 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         ],
         help="Quantizer type for activations, weights, outputs, and Fourier plane",
     )
+
+    # Weight encoding / sign handling
+    parser.add_argument(
+        "--differential-weights",
+        dest="differential_weights",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=yaml_config.differential_weights,
+        help=(
+            "Enable differential (+/- rail) encoding for weights when the "
+            "photonic/JTC backend cannot represent negative values (true/false)"
+        ),
+    )
     parser.add_argument(
         "--dataset",
         type=str,

@@ -38,6 +38,7 @@ pd_tia_distortion_strength: 0.0
 pretrain_tests_only: false
 pretrained_weights: ''
 quantizer: ste_clipped
+differential_weights: true
 run_pretrain_tests: false
 scale_output: none
 tia_distortion_data_path: ./component_data/tia_sim_data.csv

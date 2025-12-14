@@ -114,3 +114,30 @@ def test_ftconv2d_jtc_fast_backend_runs():
     out = layer(x)
     assert out.shape == (1, 2, 16, 16)
     assert torch.isfinite(out).all()
+
+
+def test_ftconv2d_jtc_fast_bipolar_weight_gradients_flow():
+    """Negative weights should be supported via differential (+/- rail) encoding."""
+    config = _base_config("jtc_fast")
+    config.differential_weights = True
+    config.dac_bits = 4
+    config.adc_bits = 6
+    config.fourier_plane_bits = None
+    config.jtc_checkpoint = False
+
+    layer = FTConv2d(
+        in_channels=1,
+        out_channels=2,
+        kernel_size=(3, 3),
+        config=config,
+        conv_backend="jtc_fast",
+        bias=False,
+    )
+    x = torch.rand(1, 1, 16, 16)
+    out = layer(x)
+    loss = out.sum()
+    loss.backward()
+
+    assert layer.weight.grad is not None
+    assert torch.isfinite(layer.weight.grad).all()
+    assert layer.weight.grad.abs().sum() > 0

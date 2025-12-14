@@ -49,16 +49,9 @@ def _apply_quantizer_by_name(
     signed_for_domain = domain in ("weight",)
     is_weight_flag = domain in ("weight",)
 
-    def _ste_clipped_signed(x: torch.Tensor, b: int) -> torch.Tensor:
-        levels = 2**b
-        s = x.detach().abs().max().clamp_min(1e-6)
-        step = 2 * s / (levels - 1)
-        xq = torch.clamp(x, -s, s)
-        return torch.round(xq / step) * step
-
     if quantizer_name == "ste_clipped":
         if signed_for_domain:
-            return _ste_clipped_signed(tensor, int(bits))
+            return QAT_STE_Signed.apply(tensor, int(bits))
         return QAT_STE.apply(tensor, int(bits))
     if quantizer_name == "ste_maxscale":
         return QAT_STE_maxscale.apply(tensor, int(bits))
@@ -584,6 +577,7 @@ class FTConv2d(Module):
             )
 
         self.quantizer_name = getattr(config, "quantizer", "ste_clipped") or "ste_clipped"
+        self.differential_weights = bool(getattr(config, "differential_weights", True))
         self.patch_length = int(config.input_length)
         self.kernel_length = int(config.kernel_length)
         if self.kernel_length != k_w:
@@ -666,8 +660,6 @@ class FTConv2d(Module):
         for c_in in range(self.in_channels):
             signal = rows[:, c_in, :, :]
             kernel = kernels[:, c_in, :]
-            if torch.all(kernel == 0):
-                continue
             contrib = self._single_channel_row_conv(signal, kernel, output_width)
             out = contrib if out is None else out + contrib
         if out is None:
@@ -678,18 +670,43 @@ class FTConv2d(Module):
         self, signal_rows: torch.Tensor, kernel: torch.Tensor, output_width: int
     ) -> torch.Tensor:
         batch_size, height, row_width = signal_rows.shape
+        cout = kernel.shape[0]
         stride = max(1, min(self.effective_stride, self.valid_per_patch))
         max_start = max(row_width - self.patch_length, 0)
         out = None
         out_col = 0
         pass_idx = 0
 
+        # Prepare kernel once per row-conv call (avoid recomputing bipolar split per patch).
+        apply_bipolar = self.differential_weights and self.conv_backend in (
+            "jtc_fast",
+            "jtc_emulation",
+        )
+        if apply_bipolar:
+            kernel_pos = torch.clamp(kernel, min=0.0)
+            kernel_neg = torch.clamp(-kernel, min=0.0)
+            kernel_prepared = torch.cat([kernel_pos, kernel_neg], dim=0)
+
+            def _apply_patch_conv_prepared(p: torch.Tensor) -> torch.Tensor:
+                if self.conv_backend == "jtc_fast":
+                    out_cat = self._jtc_fast_patch_conv_unipolar(
+                        p, kernel_prepared, weight_domain="activation"
+                    )
+                else:
+                    out_cat = self._jtc_emulation_patch_conv_unipolar(p, kernel_prepared)
+                out_pos, out_neg = out_cat.split(cout, dim=1)
+                return out_pos - out_neg
+        else:
+
+            def _apply_patch_conv_prepared(p: torch.Tensor) -> torch.Tensor:
+                return self._apply_patch_conv(p, kernel)
+
         while out_col < output_width:
             patch_start = min(pass_idx * stride, max_start)
             patch = signal_rows[..., patch_start : patch_start + self.patch_length]
             if patch.size(-1) < self.patch_length:
                 patch = F.pad(patch, (0, self.patch_length - patch.size(-1)))
-            patch_out = self._apply_patch_conv(patch, kernel)
+            patch_out = _apply_patch_conv_prepared(patch)
             valid_slice = patch_out[
                 ..., self.kernel_length - 1 : self.kernel_length - 1 + self.valid_per_patch
             ]
@@ -717,7 +734,7 @@ class FTConv2d(Module):
         if self.conv_backend == "fourier":
             return self._fourier_patch_conv(patch, kernel)
         if self.conv_backend == "jtc_fast":
-            return self._jtc_fast_patch_conv(patch, kernel)
+            return self._jtc_fast_patch_conv_unipolar(patch, kernel, weight_domain="weight")
         if self.conv_backend == "jtc_emulation":
             return self._jtc_patch_conv(patch, kernel)
         raise RuntimeError(f"Unsupported backend {self.conv_backend}")
@@ -744,6 +761,7 @@ class FTConv2d(Module):
         apply_distortions: bool,
         apply_quantization: bool,
         use_cross_spectrum: bool = False,
+        weight_domain: str = "weight",
     ) -> torch.Tensor:
         batch_size, height, _ = patch.shape
         cout = kernel.shape[0]
@@ -766,7 +784,7 @@ class FTConv2d(Module):
 
         if apply_quantization and self.config.dac_bits is not None:
             signal = quant_fn(signal, self.config.dac_bits, "activation")
-            kernel_r = quant_fn(kernel_r, self.config.dac_bits, "weight")
+            kernel_r = quant_fn(kernel_r, self.config.dac_bits, weight_domain)
 
         if apply_distortions:
             if self.jtc is None:
@@ -843,12 +861,18 @@ class FTConv2d(Module):
         )
 
     def _jtc_fast_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        return self._jtc_fast_patch_conv_unipolar(patch, kernel, weight_domain="weight")
+
+    def _jtc_fast_patch_conv_unipolar(
+        self, patch: torch.Tensor, kernel: torch.Tensor, *, weight_domain: str
+    ) -> torch.Tensor:
         def _run(p: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
             return self._jtc_vectorized_patch_conv(
                 p,
                 k,
                 apply_distortions=True,
                 apply_quantization=True,
+                weight_domain=weight_domain,
             )
 
         if (
@@ -858,6 +882,14 @@ class FTConv2d(Module):
         ):
             return _checkpoint(_run, patch, kernel)
         return _run(patch, kernel)
+
+    def _jtc_emulation_patch_conv_unipolar(
+        self, patch: torch.Tensor, kernel: torch.Tensor
+    ) -> torch.Tensor:
+        if self.jtc is None:
+            self.jtc = JTC(self.config)
+        patch_4d = patch.unsqueeze(2)  # B, H, 1, W
+        return self.jtc(patch_4d, kernel).permute(0, 2, 1, 3)
 
     def _jtc_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         if self.jtc is None:
@@ -1028,6 +1060,29 @@ class QAT_STE_maxscale(torch.autograd.Function):
     @staticmethod
     def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
         # Return gradients for (input, bits)
+        return grad_output, None
+
+
+class QAT_STE_Signed(torch.autograd.Function):
+    """Signed, symmetric STE quantizer with per-tensor clipping scale.
+
+    Matches the "ste_clipped" behavior used for activations, but supports signed
+    tensors (e.g. weights) and preserves gradient flow via a straight-through
+    estimator.
+    """
+
+    @staticmethod
+    def forward(ctx: Any, input: torch.Tensor, bits: int) -> torch.Tensor:
+        ctx.save_for_backward(input)
+        levels = 2**bits
+        input_fp32 = input.float()
+        s = input_fp32.detach().abs().max().clamp_min(1e-6)
+        step = 2 * s / (levels - 1)
+        quantized = torch.round(torch.clamp(input_fp32, -s, s) / step) * step
+        return quantized.to(input.dtype)
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
         return grad_output, None
 
 
