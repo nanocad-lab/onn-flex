@@ -682,8 +682,18 @@ class JTC(nn.Module):
     def scale_to_range(
         self, tensor: torch.Tensor, min_val: float = -30, max_val: float = -20
     ) -> torch.Tensor:
-        tensor_min = tensor.min()
-        tensor_max = tensor.max()
+        """Affine-rescale along the last dimension to [min_val, max_val].
+
+        This is used to keep signals inside the PD/TIA operating window. We scale
+        per-vector (i.e. per last-dim slice) rather than using a single global
+        min/max across the whole batch to avoid cross-sample coupling.
+        """
+        if tensor.numel() == 0:
+            return tensor
+        if tensor.dim() == 0:
+            return tensor
+        tensor_min = tensor.amin(dim=-1, keepdim=True)
+        tensor_max = tensor.amax(dim=-1, keepdim=True)
         denom = (tensor_max - tensor_min).clamp_min(1e-12)
         scaled = (tensor - tensor_min) / denom  # Scale to [0,1]
         return scaled * (max_val - min_val) + min_val  # Scale to [min_val, max_val]
