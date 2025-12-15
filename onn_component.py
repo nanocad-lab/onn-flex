@@ -680,23 +680,44 @@ class JTC(nn.Module):
         return output_plane[..., indices]
 
     def scale_to_range(
-        self, tensor: torch.Tensor, min_val: float = -30, max_val: float = -20
+        self,
+        tensor: torch.Tensor,
+        min_val: float = -30,
+        max_val: float = -20,
+        *,
+        dims: tuple[int, ...] = (-1,),
     ) -> torch.Tensor:
-        """Affine-rescale along the last dimension to [min_val, max_val].
+        """Affine-rescale to [min_val, max_val] by normalizing over `dims`.
 
-        This is used to keep signals inside the PD/TIA operating window. We scale
-        per-vector (i.e. per last-dim slice) rather than using a single global
-        min/max across the whole batch to avoid cross-sample coupling.
+        This is used to keep signals inside the PD/TIA operating window. By
+        default we scale per-vector (i.e. per last-dim slice), but callers can
+        request a common gain over multiple dimensions (e.g. across channels)
+        to avoid per-channel normalization.
         """
         if tensor.numel() == 0:
             return tensor
         if tensor.dim() == 0:
             return tensor
-        tensor_min = tensor.amin(dim=-1, keepdim=True)
-        tensor_max = tensor.amax(dim=-1, keepdim=True)
+
+        if not dims:
+            raise ValueError("dims must be a non-empty tuple of dimensions")
+
+        ndim = tensor.dim()
+        norm_dims: list[int] = []
+        for d in dims:
+            if d < 0:
+                d = ndim + d
+            if d < 0 or d >= ndim:
+                raise ValueError(f"Invalid dim {d} for tensor with dim={ndim}")
+            norm_dims.append(d)
+        # Deduplicate to avoid errors in torch.amin/amax
+        reduce_dims = tuple(sorted(set(norm_dims)))
+
+        tensor_min = tensor.amin(dim=reduce_dims, keepdim=True)
+        tensor_max = tensor.amax(dim=reduce_dims, keepdim=True)
         denom = (tensor_max - tensor_min).clamp_min(1e-12)
-        scaled = (tensor - tensor_min) / denom  # Scale to [0,1]
-        return scaled * (max_val - min_val) + min_val  # Scale to [min_val, max_val]
+        scaled = (tensor - tensor_min) / denom  # -> [0,1]
+        return scaled * (max_val - min_val) + min_val  # -> [min_val, max_val]
 
     def compute_stage_tensors(
         self,

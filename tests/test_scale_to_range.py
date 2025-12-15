@@ -55,3 +55,16 @@ def test_scale_to_range_constant_row_maps_to_min():
     y = jtc.scale_to_range(x, -2.0, 2.0)
     torch.testing.assert_close(y, torch.full_like(y, -2.0))
 
+
+def test_scale_to_range_multi_dim_common_gain():
+    """Scaling over multiple dims should apply a shared gain/offset."""
+    jtc = JTC(_config())
+    x = torch.tensor([[[[0.0, 1.0, 2.0], [0.0, 50.0, 100.0]]]])  # (1,1,2,3)
+    y = jtc.scale_to_range(x, 1e-6, 1e-5, dims=(-2, -1))
+
+    # Global min/max over the last two dims are 0 and 100.
+    torch.testing.assert_close(y.min(), torch.tensor(1e-6))
+    torch.testing.assert_close(y.max(), torch.tensor(1e-5))
+
+    # Channel 0 max (=2) should map to 1e-6 + (2/100)*(9e-6) = 1.18e-6.
+    torch.testing.assert_close(y[0, 0, 0, -1], torch.tensor(1.18e-6))

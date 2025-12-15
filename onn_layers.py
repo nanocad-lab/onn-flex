@@ -1,4 +1,5 @@
 import math
+import contextlib
 import inspect
 import warnings
 from typing import Any, Optional, Tuple
@@ -763,93 +764,106 @@ class FTConv2d(Module):
         use_cross_spectrum: bool = False,
         weight_domain: str = "weight",
     ) -> torch.Tensor:
-        batch_size, height, _ = patch.shape
-        cout = kernel.shape[0]
-        plane_size = int(self.config.jtc_total_field)
-        sep = int(self.config.jtc_separation)
-
-        patch_full = patch.unsqueeze(2).repeat(1, 1, cout, 1)  # B H Cout M
-        kernel_full = kernel.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
-
-        BHC = batch_size * height * cout
-        M = patch_full.shape[-1]
-        N = kernel_full.shape[-1]
-
-        signal = patch_full.reshape(BHC, M)
-        kernel_r = kernel_full.reshape(BHC, N)
-
-        quant_fn = lambda t, b, d: _apply_quantizer_by_name(
-            t, b, self.quantizer_name, d
+        autocast_ctx = (
+            torch.autocast(device_type=patch.device.type, enabled=False)
+            if apply_distortions
+            else contextlib.nullcontext()
         )
+        with autocast_ctx:
+            patch = patch.float()
+            kernel = kernel.float()
 
-        if apply_quantization and self.config.dac_bits is not None:
-            signal = quant_fn(signal, self.config.dac_bits, "activation")
-            kernel_r = quant_fn(kernel_r, self.config.dac_bits, weight_domain)
+            batch_size, height, _ = patch.shape
+            cout = kernel.shape[0]
+            plane_size = int(self.config.jtc_total_field)
+            sep = int(self.config.jtc_separation)
 
-        if apply_distortions:
-            if self.jtc is None:
-                self.jtc = JTC(self.config)
-            signal = self.jtc.mrm(self.jtc.driver(signal))
-            kernel_r = self.jtc.mrm(self.jtc.driver(kernel_r))
-        else:
-            signal = signal.to(torch.complex64)
-            kernel_r = kernel_r.to(torch.complex64)
+            patch_full = patch.unsqueeze(2).repeat(1, 1, cout, 1)  # B H Cout M
+            kernel_full = kernel.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
 
-        if use_cross_spectrum:
-            kernel_pad = F.pad(kernel_r, (0, plane_size - N))
-            signal_pad = F.pad(
-                signal, (N + sep, plane_size - (N + sep + M))
-            )
-            kernel_plane = kernel_pad
-            signal_plane = signal_pad
+            BHC = batch_size * height * cout
+            M = patch_full.shape[-1]
+            N = kernel_full.shape[-1]
 
-            signal_fft = torch.fft.fft(signal_plane, dim=-1)
-            kernel_fft = torch.fft.fft(kernel_plane, dim=-1)
-            cross_spectrum = signal_fft * torch.conj(kernel_fft)
-            corr_plane = torch.fft.ifft(cross_spectrum, dim=-1).real
-        else:
-            kernel_pad = F.pad(kernel_r, (0, plane_size - N))
-            signal_pad = F.pad(
-                signal, (N + sep, plane_size - (N + sep + M))
-            )
-            plane = kernel_pad + signal_pad
-            plane = torch.roll(
-                plane, shifts=(plane_size // 2) - (M + N + sep) // 2, dims=-1
+            signal = patch_full.reshape(BHC, M)
+            kernel_r = kernel_full.reshape(BHC, N)
+
+            quant_fn = lambda t, b, d: _apply_quantizer_by_name(
+                t, b, self.quantizer_name, d
             )
 
-            freq = torch.fft.fft(plane, dim=-1)
-            freq = torch.fft.fftshift(freq, dim=-1)
-            jps = torch.abs(freq) ** 2 / plane_size
+            if apply_quantization and self.config.dac_bits is not None:
+                signal = quant_fn(signal, self.config.dac_bits, "activation")
+                kernel_r = quant_fn(kernel_r, self.config.dac_bits, weight_domain)
 
-            if apply_quantization and self.config.fourier_plane_bits is not None:
-                jps = quant_fn(jps, self.config.fourier_plane_bits, "fourier")
+            if apply_distortions:
+                if self.jtc is None:
+                    self.jtc = JTC(self.config)
+                signal = self.jtc.mrm(self.jtc.driver(signal))
+                kernel_r = self.jtc.mrm(self.jtc.driver(kernel_r))
+            else:
+                signal = signal.to(torch.complex64)
+                kernel_r = kernel_r.to(torch.complex64)
 
-            corr_plane = torch.fft.ifft(torch.fft.ifftshift(jps, dim=-1), dim=-1).real
+            if use_cross_spectrum:
+                kernel_pad = F.pad(kernel_r, (0, plane_size - N))
+                signal_pad = F.pad(
+                    signal, (N + sep, plane_size - (N + sep + M))
+                )
+                kernel_plane = kernel_pad
+                signal_plane = signal_pad
 
-        # Apply the optical loss multiplier whenever requested, even if we skip
-        # other distortions for the ideal path.
-        if apply_distortions or abs(float(self.config.loss) - 1.0) > 1e-6:
-            corr_plane = corr_plane * float(self.config.loss)
+                signal_fft = torch.fft.fft(signal_plane, dim=-1)
+                kernel_fft = torch.fft.fft(kernel_plane, dim=-1)
+                cross_spectrum = signal_fft * torch.conj(kernel_fft)
+                corr_plane = torch.fft.ifft(cross_spectrum, dim=-1).real
+            else:
+                kernel_pad = F.pad(kernel_r, (0, plane_size - N))
+                signal_pad = F.pad(
+                    signal, (N + sep, plane_size - (N + sep + M))
+                )
+                plane = kernel_pad + signal_pad
+                plane = torch.roll(
+                    plane, shifts=(plane_size // 2) - (M + N + sep) // 2, dims=-1
+                )
 
-        if apply_distortions:
-            # Keep amplitudes inside PD/TIA operating window to avoid hard clamp
-            corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5)
-            corr_plane = self.jtc.pd(corr_plane)
-            corr_plane = self.jtc.tia(corr_plane)
-            if self.config.scale_output == "adc":
-                corr_plane = corr_plane / corr_plane.max(dim=-1, keepdim=True).values.clamp_min(1e-12)
+                freq = torch.fft.fft(plane, dim=-1)
+                freq = torch.fft.fftshift(freq, dim=-1)
+                jps = torch.abs(freq) ** 2 / plane_size
 
-        if apply_quantization and self.config.adc_bits is not None:
-            corr_plane = quant_fn(corr_plane, self.config.adc_bits, "output")
+                if apply_quantization and self.config.fourier_plane_bits is not None:
+                    jps = quant_fn(jps, self.config.fourier_plane_bits, "fourier")
 
-        output_length = self.config.output_length or (M + N - 1)
-        same_start = sep + 1 if use_cross_spectrum else plane_size // 2 + sep + N // 2
-        idx = torch.arange(
-            same_start, same_start + output_length, device=patch.device
-        ) % plane_size
+                corr_plane = torch.fft.ifft(torch.fft.ifftshift(jps, dim=-1), dim=-1).real
 
-        out = corr_plane[:, idx].reshape(batch_size, height, cout, output_length)
-        return out.permute(0, 2, 1, 3)
+            # Apply the optical loss multiplier whenever requested, even if we skip
+            # other distortions for the ideal path.
+            if apply_distortions or abs(float(self.config.loss) - 1.0) > 1e-6:
+                corr_plane = corr_plane * float(self.config.loss)
+
+            if apply_distortions:
+                # Keep amplitudes inside PD/TIA operating window to avoid hard clamp.
+                # Scale per (batch, height) across all output channels so differential
+                # (+/-) rails share a common gain.
+                corr_plane = corr_plane.reshape(batch_size, height, cout, plane_size)
+                corr_plane = self.jtc.scale_to_range(corr_plane, 1e-6, 1e-5, dims=(-2, -1))
+                corr_plane = self.jtc.pd(corr_plane)
+                corr_plane = self.jtc.tia(corr_plane)
+                if self.config.scale_output == "adc":
+                    corr_plane = corr_plane / corr_plane.amax(dim=-1, keepdim=True).clamp_min(1e-12)
+                corr_plane = corr_plane.reshape(BHC, plane_size)
+
+            if apply_quantization and self.config.adc_bits is not None:
+                corr_plane = quant_fn(corr_plane, self.config.adc_bits, "output")
+
+            output_length = self.config.output_length or (M + N - 1)
+            same_start = sep + 1 if use_cross_spectrum else plane_size // 2 + sep + N // 2
+            idx = torch.arange(
+                same_start, same_start + output_length, device=patch.device
+            ) % plane_size
+
+            out = corr_plane[:, idx].reshape(batch_size, height, cout, output_length)
+            return out.permute(0, 2, 1, 3)
 
     def _fourier_patch_conv(self, patch: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         return self._jtc_vectorized_patch_conv(
