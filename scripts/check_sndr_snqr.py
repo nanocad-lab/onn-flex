@@ -123,18 +123,16 @@ def main() -> None:
 
     params = [p.strip() for p in (args.params or "").split(",") if p.strip()]
     for param in params:
-        sndr, enob = compute_snr_enob(cfg, param, num_tests=args.snr_tests, seed=args.seed)
-        sndr_jps = compute_snr_jps(
+        sndr, enob = compute_snr_enob(
             cfg, param, num_tests=args.snr_tests, seed=args.seed
         )
+        sndr_jps = compute_snr_jps(cfg, param, num_tests=args.snr_tests, seed=args.seed)
         print(
             f"SNDR({param}): output={sndr:.2f} dB (ENOB~{enob:.2f}) | JPS={sndr_jps:.2f} dB"
         )
 
     if args.sqndr:
-        sqndr, enob = compute_sqndr_enob(
-            cfg, num_tests=args.snr_tests, seed=args.seed
-        )
+        sqndr, enob = compute_sqndr_enob(cfg, num_tests=args.snr_tests, seed=args.seed)
         print(f"SQNDR(total): {sqndr:.2f} dB (ENOB~{enob:.2f})")
 
     if args.sndr_vs_quantized_ideal:

@@ -74,12 +74,15 @@ class TestVariableLengths:
         with pytest.raises(ValueError, match="too small"):
             JTC(config)
 
-    @pytest.mark.parametrize("input_len,kernel_len,lens,sep,expected_output", [
-        (8, 3, 32, 7, 10),   # M+N-1 = 8+3-1 = 10
-        (16, 8, 48, 9, 23),  # M+N-1 = 16+8-1 = 23
-        (16, 8, 64, 15, 23), # M+N-1 = 16+8-1 = 23
-        (8, 8, 48, 8, 15),   # M+N-1 = 8+8-1 = 15 (golden code case!)
-    ])
+    @pytest.mark.parametrize(
+        "input_len,kernel_len,lens,sep,expected_output",
+        [
+            (8, 3, 32, 7, 10),  # M+N-1 = 8+3-1 = 10
+            (16, 8, 48, 9, 23),  # M+N-1 = 16+8-1 = 23
+            (16, 8, 64, 15, 23),  # M+N-1 = 16+8-1 = 23
+            (8, 8, 48, 8, 15),  # M+N-1 = 8+8-1 = 15 (golden code case!)
+        ],
+    )
     def test_jtc_forward_shape(self, input_len, kernel_len, lens, sep, expected_output):
         """Test that JTC forward pass produces correct output shape."""
         config = AppConfig(
@@ -195,15 +198,20 @@ class TestVariableLengths:
         # Apply 1D convolution with full padding to get correlation
         # For full correlation, we need padding of kernel_len - 1
         padding = len(kernel) - 1
-        output = F.conv1d(signal_conv, kernel_conv, padding=padding)  # [batch, 1, input_len+kernel_len-1]
+        output = F.conv1d(
+            signal_conv, kernel_conv, padding=padding
+        )  # [batch, 1, input_len+kernel_len-1]
         return output.squeeze(1)  # [batch, input_len+kernel_len-1]
 
-    @pytest.mark.parametrize("input_len,kernel_len,lens,sep", [
-        (8, 3, 32, 7),
-        (16, 8, 48, 9),
-        (16, 8, 64, 15),
-        (8, 8, 48, 8),  # Golden code case: M=N, should give 15 outputs
-    ])
+    @pytest.mark.parametrize(
+        "input_len,kernel_len,lens,sep",
+        [
+            (8, 3, 32, 7),
+            (16, 8, 48, 9),
+            (16, 8, 64, 15),
+            (8, 8, 48, 8),  # Golden code case: M=N, should give 15 outputs
+        ],
+    )
     def test_jtc_physics_correct(self, input_len, kernel_len, lens, sep):
         """Test that JTC correctly implements optical physics (magnitude outputs)."""
         config = AppConfig(
@@ -219,7 +227,7 @@ class TestVariableLengths:
             scale_output="none",
         )
 
-        jtc = JTC(config)
+        JTC(config)
         expected_output_len = input_len + kernel_len - 1
 
         # Create test inputs
@@ -247,11 +255,14 @@ class TestVariableLengths:
         result = result.squeeze(1).squeeze(1)  # [batch, output_len]
 
         # Test 1: Correct shape (full correlation M+N-1)
-        assert result.shape == (batch_size, expected_output_len), \
-            f"Expected shape ({batch_size}, {expected_output_len}), got {result.shape}"
+        assert result.shape == (
+            batch_size,
+            expected_output_len,
+        ), f"Expected shape ({batch_size}, {expected_output_len}), got {result.shape}"
 
         # Test 2: All outputs are non-negative (light intensity magnitudes)
-        assert (result >= 0).all(), "JTC outputs should be non-negative (light intensity)"
+        nonnegative = (result >= 0).all()
+        assert nonnegative, "JTC outputs should be non-negative (light intensity)"
 
         # Test 3: Outputs are finite
         assert torch.isfinite(result).all(), "JTC outputs should be finite"
@@ -259,7 +270,9 @@ class TestVariableLengths:
         # Test 4: Zero kernel gives mostly autocorrelation of signal
         with torch.no_grad():
             layer.weights.data[:] = 0.0
-        result_zero_kernel = layer.fourier_conv_forward(signal_jtc, torch.zeros_like(kernel_jtc))
+        result_zero_kernel = layer.fourier_conv_forward(
+            signal_jtc, torch.zeros_like(kernel_jtc)
+        )
         result_zero_kernel = result_zero_kernel.squeeze(1).squeeze(1)
         # Should still be non-negative and finite
         assert (result_zero_kernel >= 0).all()
@@ -268,4 +281,12 @@ class TestVariableLengths:
 
 if __name__ == "__main__":
     # Run tests with pytest
-    pytest.main([__file__, "-v", "--tb=short", "-k", "test_usable_outputs_calculation or test_jtc_initialization"])
+    pytest.main(
+        [
+            __file__,
+            "-v",
+            "--tb=short",
+            "-k",
+            "test_usable_outputs_calculation or test_jtc_initialization",
+        ]
+    )

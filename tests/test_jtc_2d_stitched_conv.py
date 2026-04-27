@@ -17,7 +17,9 @@ from onn_layers import FTconvlayer
 from jtc_cycle_planner import compute_contamination_profile
 
 
-def pytorch_conv2d_reference(image: torch.Tensor, kernel_2d: torch.Tensor) -> torch.Tensor:
+def pytorch_conv2d_reference(
+    image: torch.Tensor, kernel_2d: torch.Tensor
+) -> torch.Tensor:
     """Compute reference 2D convolution using PyTorch (valid padding).
 
     Args:
@@ -37,7 +39,9 @@ def pytorch_conv2d_reference(image: torch.Tensor, kernel_2d: torch.Tensor) -> to
     return output.squeeze()
 
 
-def jtc_2d_stitched_conv(image: torch.Tensor, kernel_2d: torch.Tensor, config: AppConfig) -> torch.Tensor:
+def jtc_2d_stitched_conv(
+    image: torch.Tensor, kernel_2d: torch.Tensor, config: AppConfig
+) -> torch.Tensor:
     """Perform 2D convolution using JTC with row-wise stitching.
 
     Algorithm:
@@ -114,7 +118,7 @@ def jtc_2d_stitched_conv(image: torch.Tensor, kernel_2d: torch.Tensor, config: A
                 # Pad with zeros if patch is shorter than M
                 if len(patch) < M:
                     patch_padded = torch.zeros(M, device=patch.device)
-                    patch_padded[:len(patch)] = patch
+                    patch_padded[: len(patch)] = patch
                     patch = patch_padded
 
                 # Prepare for JTC: [B=1, H=1, in_ch=1, W=M]
@@ -165,7 +169,9 @@ class TestJTC2DStitchedConv:
         # Get configuration profile
         total, clean, stride = compute_contamination_profile(M, N, plane_size, sep)
         print(f"\nConfig: M={M}, N={N}, plane={plane_size}, sep={sep}")
-        print(f"  Total outputs: {total}, Clean valid: {clean}, Effective stride: {stride}")
+        print(
+            f"  Total outputs: {total}, Clean valid: {clean}, Effective stride: {stride}"
+        )
         assert stride > 0, "Config should have positive stride"
 
         config = AppConfig(
@@ -212,17 +218,23 @@ class TestJTC2DStitchedConv:
         print(f"  Relative error: {rel_error:.4f}")
 
         # For clean config, should match closely
-        assert rel_error < 0.05, f"JTC should match PyTorch within 5% for clean config, got {rel_error:.4f}"
+        msg = (
+            f"JTC should match PyTorch within 5% for clean config, got {rel_error:.4f}"
+        )
+        assert rel_error < 0.05, msg
 
         # Print some sample values
-        print(f"\n  Sample outputs (first 3x3):")
+        print("\n  Sample outputs (first 3x3):")
         print(f"  PyTorch:\n{pytorch_output[:3, :3]}")
         print(f"  JTC:\n{jtc_output[:3, :3]}")
 
-    @pytest.mark.parametrize("H,W,Kh,Kw", [
-        (12, 12, 3, 3),
-        (16, 16, 3, 3),
-    ])
+    @pytest.mark.parametrize(
+        "H,W,Kh,Kw",
+        [
+            (12, 12, 3, 3),
+            (16, 16, 3, 3),
+        ],
+    )
     def test_2d_varying_sizes(self, H, W, Kh, Kw):
         """Test 2D convolution with varying image sizes."""
         # Clean config
@@ -255,7 +267,9 @@ class TestJTC2DStitchedConv:
         print(f"\nImage {H}x{W}, Kernel {Kh}x{Kw}:")
         print(f"  Output shape: {jtc_output.shape}")
 
-        rel_error = (torch.abs(pytorch_output - jtc_output).max() / pytorch_output.max()).item()
+        rel_error = (
+            torch.abs(pytorch_output - jtc_output).max() / pytorch_output.max()
+        ).item()
         print(f"  Relative error: {rel_error:.4f}")
 
         assert rel_error < 0.05, f"Should match within 5%, got {rel_error:.4f}"

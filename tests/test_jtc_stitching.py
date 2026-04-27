@@ -6,7 +6,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
-import torch
 from jtc_cycle_planner import (
     usable_outputs,
     compute_contamination_profile,
@@ -22,7 +21,7 @@ class TestContaminationProfile:
         # Config with good separation
         M, N, plane, sep = 16, 8, 64, 15
 
-        total, _, _ = compute_contamination_profile(M, N, plane, sep)
+        total, clean, stride = compute_contamination_profile(M, N, plane, sep)
 
         # Should get full correlation length
         assert total == M + N - 1  # 23
@@ -58,7 +57,7 @@ class TestContaminationProfile:
 
         print(f"\nM={M}, N={N}, plane={plane}, sep={sep} (golden code)")
         print(f"  Total outputs: {total}")
-        print(f"  Clean outputs: {clean} ({100*clean/total:.1f}%)")
+        print(f"  Clean outputs: {clean} ({100 * clean / total:.1f}%)")
         print(f"  Effective stride: {stride}")
 
     def test_contamination_profile_invalid_config(self):
@@ -72,12 +71,15 @@ class TestContaminationProfile:
         assert clean == 0
         assert stride == 0
 
-    @pytest.mark.parametrize("M,N,plane,sep", [
-        (8, 3, 32, 7),
-        (16, 8, 48, 9),
-        (16, 8, 64, 15),
-        (8, 8, 48, 8),
-    ])
+    @pytest.mark.parametrize(
+        "M,N,plane,sep",
+        [
+            (8, 3, 32, 7),
+            (16, 8, 48, 9),
+            (16, 8, 64, 15),
+            (8, 8, 48, 8),
+        ],
+    )
     def test_contamination_all_test_configs(self, M, N, plane, sep):
         """Test contamination profile for all standard test configs."""
         total, clean, stride = compute_contamination_profile(M, N, plane, sep)
@@ -95,7 +97,7 @@ class TestContaminationProfile:
 
         print(f"\nM={M}, N={N}, plane={plane}, sep={sep}")
         print(f"  Total={total}, Clean={clean}, Stride={stride}")
-        print(f"  Clean percentage: {100*clean/total:.1f}%")
+        print(f"  Clean percentage: {100 * clean / total:.1f}%")
 
 
 class TestCyclesForConfig:
@@ -178,23 +180,29 @@ class TestCyclesForConfig:
 
         # Verify we have enough passes to cover all 30 pixels
         coverage = passes * stride
-        assert coverage >= 30, f"Coverage {coverage} < 30 with {passes} passes of stride {stride}"
+        msg = f"Coverage {coverage} < 30 with {passes} passes of stride {stride}"
+        assert coverage >= 30, msg
 
         # Verify we don't have too many passes (shouldn't be more than 1 pass extra)
-        assert (passes - 1) * stride < 30, f"Too many passes: {passes-1} passes already cover {(passes-1)*stride} >= 30"
+        covered_before_last_pass = (passes - 1) * stride
+        msg = f"Too many passes: {passes - 1} passes already cover {covered_before_last_pass} >= 30"
+        assert covered_before_last_pass < 30, msg
 
         print(f"\nStitching verification for M={M}, N={N}:")
-        print(f"  Output row width: 30 pixels")
+        print("  Output row width: 30 pixels")
         print(f"  Effective stride: {stride}")
         print(f"  Number of passes: {passes}")
         print(f"  Coverage: {coverage} pixels")
-        print(f"  ✓ Stitching logic correct")
+        print("  ✓ Stitching logic correct")
 
-    @pytest.mark.parametrize("M,N,plane,sep", [
-        (8, 3, 32, 7),
-        (16, 8, 48, 9),
-        (16, 8, 64, 15),
-    ])
+    @pytest.mark.parametrize(
+        "M,N,plane,sep",
+        [
+            (8, 3, 32, 7),
+            (16, 8, 48, 9),
+            (16, 8, 64, 15),
+        ],
+    )
     def test_cycles_multiple_configs(self, M, N, plane, sep):
         """Test cycle computation for multiple configs."""
         result = cycles_for_config(M, N, plane, sep)
@@ -218,10 +226,12 @@ class TestCyclesForConfig:
             # cycles_for_config uses WIDTH=32 from jtc_cycle_planner
             # out_w = WIDTH - N + 1
             import math
+
             WIDTH = 32  # From jtc_cycle_planner
             out_w = WIDTH - N + 1
             expected_passes = math.ceil(out_w / stride)
-            assert passes == expected_passes, f"Expected {expected_passes} passes for width {out_w} with stride {stride}, got {passes}"
+            msg = f"Expected {expected_passes} passes for width {out_w} with stride {stride}, got {passes}"
+            assert passes == expected_passes, msg
 
 
 class TestStitchingEdgeCases:

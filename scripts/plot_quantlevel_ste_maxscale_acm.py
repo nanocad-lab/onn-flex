@@ -151,7 +151,7 @@ def main() -> None:
         ax.set_xticks(sorted(set(x)))
     ax.grid(True, which="major", axis="x")
     ax.invert_xaxis()  # high bits on the left
-    #ax.legend(loc="best", frameon=True)
+    # ax.legend(loc="best", frameon=True)
 
     fig.tight_layout()
     fig.savefig(out_path)

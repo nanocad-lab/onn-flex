@@ -33,8 +33,6 @@ def compute_contamination_profile(
     # Physics-based analysis
     autocorr_center = lens_size // 2
     autocorr_length = 2 * max(M, N) - 1
-    autocorr_start = autocorr_center - (autocorr_length // 2)
-    autocorr_end = autocorr_start + autocorr_length
 
     # Extraction start (formula without +1, as analysis shows)
     extraction_start = lens_size // 2 + sep + N // 2
@@ -71,7 +69,9 @@ def compute_contamination_profile(
     if clean_valid_count == num_valid_outputs:
         # All valid outputs appear clean - use M-N+1 but be conservative for small configs
         if num_valid_outputs <= 6:
-            effective_stride = max(num_valid_outputs - 1, 1)  # Conservative: exclude last output
+            effective_stride = max(
+                num_valid_outputs - 1, 1
+            )  # Conservative: exclude last output
         else:
             effective_stride = num_valid_outputs  # Large enough to trust
     else:
@@ -186,7 +186,6 @@ def sweep(
             for input_len in input_lengths:
                 if input_len < kernel_len or input_len <= 0:
                     continue
-                output_len = input_len - kernel_len + 1
                 max_sep = lens - (input_len + kernel_len)
                 if max_sep < 0:
                     continue
@@ -211,8 +210,14 @@ def sweep(
                         "passes_per_width": passes,
                         "total_cycles": cycles,
                     }
-                    if best_cycles is None or cycles < best_cycles or (
-                        cycles == best_cycles and effective_stride > (best_row or {}).get("effective_stride", 0)
+                    if (
+                        best_cycles is None
+                        or cycles < best_cycles
+                        or (
+                            cycles == best_cycles
+                            and effective_stride
+                            > (best_row or {}).get("effective_stride", 0)
+                        )
                     ):
                         best_cycles = cycles
                         best_row = row
@@ -240,13 +245,30 @@ def _expand_lengths(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sweep JTC lens parameters")
-    parser.add_argument("--input-lengths", type=int, nargs="+", default=list(range(3, 33)),
-                        help="Candidate input lengths (defaults to 3..32)")
-    parser.add_argument("--kernel-lengths", type=int, nargs="+", default=[3],
-                        help="Candidate kernel lengths (defaults to 3)")
-    parser.add_argument("--lens-sizes", type=int, nargs="+", default=list(range(32, 65)))
-    parser.add_argument("--separations", type=int, nargs="+", default=None,
-                        help="Candidate separations (defaults to 0..max feasible for each lens)")
+    parser.add_argument(
+        "--input-lengths",
+        type=int,
+        nargs="+",
+        default=list(range(3, 33)),
+        help="Candidate input lengths (defaults to 3..32)",
+    )
+    parser.add_argument(
+        "--kernel-lengths",
+        type=int,
+        nargs="+",
+        default=[3],
+        help="Candidate kernel lengths (defaults to 3)",
+    )
+    parser.add_argument(
+        "--lens-sizes", type=int, nargs="+", default=list(range(32, 65))
+    )
+    parser.add_argument(
+        "--separations",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Candidate separations (defaults to 0..max feasible for each lens)",
+    )
     parser.add_argument("--output", type=str, default="jtc_cycles.csv")
     return parser.parse_args(argv)
 

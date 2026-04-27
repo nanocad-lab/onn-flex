@@ -183,16 +183,22 @@ class FTconvlayer(_ConvNd):
                         f"Got weight width={weight.shape[-1]}"
                     )
                 # Check JTC plane sizing
-                required_size = self.config.input_length + self.config.kernel_length + self.config.jtc_separation
+                required_size = (
+                    self.config.input_length
+                    + self.config.kernel_length
+                    + self.config.jtc_separation
+                )
                 if self.config.jtc_total_field < required_size:
                     warnings.warn(
                         f"JTC total field ({self.config.jtc_total_field}) is smaller than "
                         f"required size ({required_size} = input_length + kernel_length + separation). "
                         f"This may cause errors or aliasing artifacts.",
-                        UserWarning
+                        UserWarning,
                     )
 
-    def jtc_emulation_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def jtc_emulation_forward(
+        self, x: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
         """Full hardware JTC emulation pipeline with distortions."""
         return self.PIC_CONV(x, weight)
 
@@ -349,11 +355,10 @@ class FTconvlayer(_ConvNd):
             output_length = M + N - 1
 
         # Extract indices, wrapping around plane_size
-        output_indices = torch.arange(
-            same_start,
-            same_start + output_length,
-            device=x.device
-        ) % plane_size
+        output_indices = (
+            torch.arange(same_start, same_start + output_length, device=x.device)
+            % plane_size
+        )
 
         convolution_output_batched = output_plane_abs[:, output_indices]
 
@@ -406,9 +411,9 @@ class FTconvlayer(_ConvNd):
                             0, 2, 3, 1
                         )
                     case "jtc_emulation":
-                        system_out = self.jtc_emulation_forward(patch, weight_c).permute(
-                            0, 2, 3, 1
-                        )
+                        system_out = self.jtc_emulation_forward(
+                            patch, weight_c
+                        ).permute(0, 2, 3, 1)
                     case _:
                         raise ValueError(
                             f"Unknown conv_backend: {backend}. "
@@ -416,7 +421,12 @@ class FTconvlayer(_ConvNd):
                         )
                 # Get the actual output length
                 actual_out_len = system_out.shape[2]
-                output[:, c_out_start:c_out_end, patch_size * i_p : patch_size * i_p + actual_out_len, :] += system_out
+                output[
+                    :,
+                    c_out_start:c_out_end,
+                    patch_size * i_p : patch_size * i_p + actual_out_len,
+                    :,
+                ] += system_out
         return output
 
     def pseudo_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -598,7 +608,5 @@ class QAT_STE(torch.autograd.Function):
         return torch.round(torch.clamp(input, 0.0, s) * (levels - 1)) / (levels - 1)
 
     @staticmethod
-    def backward(
-        ctx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None]:
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None]:
         return grad_output, None, None

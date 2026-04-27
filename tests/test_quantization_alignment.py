@@ -185,7 +185,7 @@ class TestQuantizationAlignment:
         kernel_quantized = QuantDequant_STE.apply(kernel_clamped, base_config.dac_bits)
 
         # Compute a simple loss
-        loss = (signal_quantized.sum() + kernel_quantized.sum())
+        loss = signal_quantized.sum() + kernel_quantized.sum()
         loss.backward()
 
         # Gradients should exist and be finite
@@ -198,13 +198,13 @@ class TestQuantizationAlignment:
         """Test that gradients flow through fourier_plane_bits quantization."""
         base_config.conv_backend = "jtc_emulation"
 
-        jtc = JTC(base_config)
-
         # Create simple inputs with gradients
         signal = torch.rand(1, 8, requires_grad=True)
 
         # Apply Fourier plane quantization
-        signal_quantized = QuantDequant_STE.apply(signal, base_config.fourier_plane_bits)
+        signal_quantized = QuantDequant_STE.apply(
+            signal, base_config.fourier_plane_bits
+        )
 
         # Compute loss
         loss = signal_quantized.sum()

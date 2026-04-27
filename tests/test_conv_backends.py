@@ -324,7 +324,7 @@ class TestConvBackends:
         # Should produce a warning about aliasing
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            output = layer(test_input)
+            _ = layer(test_input)
             assert len(w) > 0
             assert "aliasing" in str(w[0].message).lower()
 

@@ -40,9 +40,7 @@ def _ideal_param_value(param: str) -> float | None:
     return 0.0
 
 
-def _build_ideal_reference_cfg(
-    config: AppConfig, *, disable_quant: bool
-) -> AppConfig:
+def _build_ideal_reference_cfg(config: AppConfig, *, disable_quant: bool) -> AppConfig:
     """Build an "ideal" reference config for SQNDR-like comparisons.
 
     The reference disables all distortion/noise terms; optionally disables

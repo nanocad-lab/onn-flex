@@ -132,7 +132,7 @@ class AppConfig:
 
     def __post_init__(self):
         """Validate configuration parameters."""
-        valid_backends = ['pytorch', 'fourier', 'jtc_emulation']
+        valid_backends = ["pytorch", "fourier", "jtc_emulation"]
         if self.conv_backend is not None and self.conv_backend not in valid_backends:
             raise ValueError(
                 f"Invalid conv_backend '{self.conv_backend}'. "

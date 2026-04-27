@@ -107,7 +107,9 @@ def _finetune_case(
     os.makedirs(out_dir, exist_ok=True)
     # Enable fine-tuning from checkpoint
     epochs_for_finetune = (
-        cfg.num_epochs + int(additional_epochs) if additional_epochs > 0 else cfg.num_epochs
+        cfg.num_epochs + int(additional_epochs)
+        if additional_epochs > 0
+        else cfg.num_epochs
     )
     lr = finetune_lr if finetune_lr is not None else cfg.learning_rate
     cfg = replace(

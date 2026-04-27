@@ -14,13 +14,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import torch.nn.functional as F
 import pytest
-import numpy as np
 from onn_config import AppConfig
 from onn_component import JTC
 from jtc_cycle_planner import usable_outputs
 
 
-def compute_reference_correlation(signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+def compute_reference_correlation(
+    signal: torch.Tensor, kernel: torch.Tensor
+) -> torch.Tensor:
     """Compute reference correlation using PyTorch's conv1d.
 
     Correlation is like convolution but without flipping the kernel.
@@ -38,8 +39,14 @@ def compute_reference_correlation(signal: torch.Tensor, kernel: torch.Tensor) ->
     return output.squeeze()  # [M+N-1]
 
 
-def compute_jtc_full_output(signal: torch.Tensor, kernel: torch.Tensor,
-                            M: int, N: int, sep: int, plane_size: int) -> torch.Tensor:
+def compute_jtc_full_output(
+    signal: torch.Tensor,
+    kernel: torch.Tensor,
+    M: int,
+    N: int,
+    sep: int,
+    plane_size: int,
+) -> torch.Tensor:
     """Compute full JTC output plane (before extraction).
 
     Returns the magnitude of the inverse FFT of the JPS.
@@ -75,13 +82,18 @@ def compute_jtc_full_output(signal: torch.Tensor, kernel: torch.Tensor,
 class TestJTCCyclePlannerValidation:
     """Validate jtc_cycle_planner against actual JTC physics."""
 
-    @pytest.mark.parametrize("input_len,kernel_len,lens,sep", [
-        (8, 3, 32, 7),
-        (16, 8, 48, 9),
-        (16, 8, 64, 15),
-        (8, 8, 48, 8),  # Golden code case
-    ])
-    def test_usable_outputs_matches_overlap_free_region(self, input_len, kernel_len, lens, sep):
+    @pytest.mark.parametrize(
+        "input_len,kernel_len,lens,sep",
+        [
+            (8, 3, 32, 7),
+            (16, 8, 48, 9),
+            (16, 8, 64, 15),
+            (8, 8, 48, 8),  # Golden code case
+        ],
+    )
+    def test_usable_outputs_matches_overlap_free_region(
+        self, input_len, kernel_len, lens, sep
+    ):
         """Test that usable_outputs count matches actual overlap-free correlation outputs.
 
         Strategy:
@@ -107,7 +119,9 @@ class TestJTCCyclePlannerValidation:
         assert len(ref_correlation) == expected_full_correlation
 
         # Compute JTC output plane
-        jtc_output_plane = compute_jtc_full_output(signal, kernel, M, N, sep, plane_size)
+        jtc_output_plane = compute_jtc_full_output(
+            signal, kernel, M, N, sep, plane_size
+        )
 
         # Extract outputs using golden code formula
         same_start = plane_size // 2 + sep + N // 2 + 1
@@ -122,13 +136,17 @@ class TestJTCCyclePlannerValidation:
         best_corr = -1
         best_offset = None
         for offset in range(expected_full_correlation - predicted_usable + 1):
-            ref_subset = torch.abs(ref_correlation[offset:offset + predicted_usable])
+            ref_subset = torch.abs(ref_correlation[offset : offset + predicted_usable])
             # Normalize both for comparison
             if ref_subset.std() > 1e-6 and jtc_extracted.std() > 1e-6:
-                corr = torch.corrcoef(torch.stack([
-                    ref_subset / ref_subset.std(),
-                    jtc_extracted / jtc_extracted.std()
-                ]))[0, 1].item()
+                corr = torch.corrcoef(
+                    torch.stack(
+                        [
+                            ref_subset / ref_subset.std(),
+                            jtc_extracted / jtc_extracted.std(),
+                        ]
+                    )
+                )[0, 1].item()
                 if corr > best_corr:
                     best_corr = corr
                     best_offset = offset
@@ -136,21 +154,23 @@ class TestJTCCyclePlannerValidation:
         print(f"\nConfig: M={M}, N={N}, lens={plane_size}, sep={sep}")
         print(f"  Predicted usable outputs: {predicted_usable}")
         print(f"  Expected full correlation: {expected_full_correlation}")
-        print(f"  Best correlation with reference: {best_corr:.4f} at offset {best_offset}")
+        print(
+            f"  Best correlation with reference: {best_corr:.4f} at offset {best_offset}"
+        )
 
         # CRITICAL TEST: Does extracted JTC output correlate well with reference?
         # If correlation is high (> 0.95), the outputs are clean
         if predicted_usable == expected_full_correlation:
             # Should get all M+N-1 outputs and they should match reference well
-            assert best_corr > 0.9, (
+            msg = (
                 f"Cycle planner claims all {predicted_usable} outputs are usable, "
                 f"but correlation with reference is only {best_corr:.4f}"
             )
+            assert best_corr > 0.9, msg
         else:
             # Should get a subset that matches
-            assert best_corr > 0.85, (
-                f"Extracted outputs should correlate well with reference, got {best_corr:.4f}"
-            )
+            msg = f"Extracted outputs should correlate well with reference, got {best_corr:.4f}"
+            assert best_corr > 0.85, msg
 
     def test_edge_case_wrapping_detection(self):
         """Test that wrapping indices don't contaminate autocorrelation.
@@ -170,7 +190,9 @@ class TestJTCCyclePlannerValidation:
         same_end = same_start + predicted_usable
 
         print(f"\nWrapping test: M={M}, N={N}, plane_size={plane_size}, sep={sep}")
-        print(f"  same_start={same_start}, same_end={same_end}, plane_size={plane_size}")
+        print(
+            f"  same_start={same_start}, same_end={same_end}, plane_size={plane_size}"
+        )
         print(f"  Wrapping: {same_end > plane_size}")
 
         if same_end > plane_size:
@@ -182,16 +204,20 @@ class TestJTCCyclePlannerValidation:
             # Extends roughly ± max(M-1, N-1)
             auto_center = plane_size // 2
             auto_extent = max(M - 1, N - 1)
-            auto_region = set(range(
-                (auto_center - auto_extent) % plane_size,
-                (auto_center + auto_extent + 1) % plane_size
-            ))
+            auto_region = set(
+                range(
+                    (auto_center - auto_extent) % plane_size,
+                    (auto_center + auto_extent + 1) % plane_size,
+                )
+            )
 
             # Check overlap
             overlap = set(wrapped_indices) & auto_region
 
             print(f"  Wrapped indices: {wrapped_indices}")
-            print(f"  Autocorrelation region: [{auto_center - auto_extent}, {auto_center + auto_extent}]")
+            print(
+                f"  Autocorrelation region: [{auto_center - auto_extent}, {auto_center + auto_extent}]"
+            )
             print(f"  Overlap: {overlap}")
 
             # If there's overlap, the simple formula is WRONG
@@ -201,11 +227,14 @@ class TestJTCCyclePlannerValidation:
                     f"The simple formula M+N+sep <= plane_size is insufficient."
                 )
 
-    @pytest.mark.parametrize("input_len,kernel_len,lens,sep", [
-        (8, 3, 32, 7),
-        (16, 8, 48, 9),
-        (8, 8, 48, 8),
-    ])
+    @pytest.mark.parametrize(
+        "input_len,kernel_len,lens,sep",
+        [
+            (8, 3, 32, 7),
+            (16, 8, 48, 9),
+            (8, 8, 48, 8),
+        ],
+    )
     def test_cycle_planner_vs_actual_jtc_output(self, input_len, kernel_len, lens, sep):
         """Test that cycle planner prediction matches actual JTC implementation."""
         M, N = input_len, kernel_len
@@ -228,10 +257,11 @@ class TestJTCCyclePlannerValidation:
         jtc = JTC(config)
 
         # Check that JTC's output_length matches prediction
-        assert jtc.output_length == predicted_usable, (
+        msg = (
             f"JTC output_length ({jtc.output_length}) != "
             f"cycle planner prediction ({predicted_usable})"
         )
+        assert jtc.output_length == predicted_usable, msg
 
         # Test actual forward pass
         batch_size = 2
@@ -241,10 +271,11 @@ class TestJTCCyclePlannerValidation:
         output = jtc(signal, kernel)
 
         # Verify output shape matches prediction
-        assert output.shape[-1] == predicted_usable, (
+        msg = (
             f"JTC output length ({output.shape[-1]}) != "
             f"cycle planner prediction ({predicted_usable})"
         )
+        assert output.shape[-1] == predicted_usable, msg
 
         print(f"\nConfig: M={M}, N={N}, lens={lens}, sep={sep}")
         print(f"  Predicted: {predicted_usable}")

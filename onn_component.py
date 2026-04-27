@@ -563,7 +563,10 @@ class JTC(nn.Module):
             self.output_length = config.output_length
 
         # Validate that configuration is feasible
-        if self.input_length + self.kernel_length + self.jtc_separation > self.jtc_total_field:
+        if (
+            self.input_length + self.kernel_length + self.jtc_separation
+            > self.jtc_total_field
+        ):
             raise ValueError(
                 f"JTC total field ({self.jtc_total_field}) is too small for "
                 f"input_length ({self.input_length}) + kernel_length ({self.kernel_length}) + "
@@ -571,8 +574,13 @@ class JTC(nn.Module):
             )
 
         # Analyze contamination profile using cycle planner
-        total_outputs, clean_valid_outputs, effective_stride = compute_contamination_profile(
-            self.input_length, self.kernel_length, self.jtc_total_field, self.jtc_separation
+        total_outputs, clean_valid_outputs, effective_stride = (
+            compute_contamination_profile(
+                self.input_length,
+                self.kernel_length,
+                self.jtc_total_field,
+                self.jtc_separation,
+            )
         )
         self.total_correlation_outputs = total_outputs
         self.clean_valid_outputs = clean_valid_outputs
@@ -583,16 +591,19 @@ class JTC(nn.Module):
         # For valid conv, we use M-N+1 outputs from the M+N-1 correlation
         num_valid_outputs = self.input_length - self.kernel_length + 1
         if num_valid_outputs > 0:
-            valid_contamination_percent = 100 * (1 - clean_valid_outputs / num_valid_outputs)
+            valid_contamination_percent = 100 * (
+                1 - clean_valid_outputs / num_valid_outputs
+            )
             if valid_contamination_percent > 10:
                 import warnings
+
                 warnings.warn(
                     f"JTC config has {valid_contamination_percent:.1f}% contamination in valid outputs: "
                     f"M={self.input_length}, N={self.kernel_length}, "
                     f"plane={self.jtc_total_field}, sep={self.jtc_separation}. "
                     f"Clean valid outputs: {clean_valid_outputs}/{num_valid_outputs}, "
                     f"Effective stride: {effective_stride}",
-                    UserWarning
+                    UserWarning,
                 )
 
         # Ordered list of available stage names
@@ -657,11 +668,10 @@ class JTC(nn.Module):
         N = self.kernel_length
 
         same_start = plane_size // 2 + sep + N // 2
-        indices = torch.arange(
-            same_start,
-            same_start + self.output_length,
-            device=device
-        ) % plane_size
+        indices = (
+            torch.arange(same_start, same_start + self.output_length, device=device)
+            % plane_size
+        )
         return indices
 
     def build_input_plane(
@@ -682,11 +692,17 @@ class JTC(nn.Module):
 
         # Validation
         if M > self.input_length:
-            raise ValueError(f"Signal length ({M}) is greater than configured input_length ({self.input_length})")
+            raise ValueError(
+                f"Signal length ({M}) is greater than configured input_length ({self.input_length})"
+            )
         if N > self.kernel_length:
-            raise ValueError(f"Kernel length ({N}) is greater than configured kernel_length ({self.kernel_length})")
+            raise ValueError(
+                f"Kernel length ({N}) is greater than configured kernel_length ({self.kernel_length})"
+            )
         if M + N + self.jtc_separation > self.jtc_total_field:
-            raise ValueError(f"Not enough JTC field: {M} + {N} + {self.jtc_separation} > {self.jtc_total_field}")
+            raise ValueError(
+                f"Not enough JTC field: {M} + {N} + {self.jtc_separation} > {self.jtc_total_field}"
+            )
 
         # Calculate positions
         kernel_start = 0
@@ -734,11 +750,17 @@ class JTC(nn.Module):
         M = signal.shape[-1]
         N = kernel.shape[-1]
         if M > self.input_length:
-            raise ValueError(f"Signal length ({M}) is greater than configured input_length ({self.input_length})")
+            raise ValueError(
+                f"Signal length ({M}) is greater than configured input_length ({self.input_length})"
+            )
         if N > self.kernel_length:
-            raise ValueError(f"Kernel length ({N}) is greater than configured kernel_length ({self.kernel_length})")
+            raise ValueError(
+                f"Kernel length ({N}) is greater than configured kernel_length ({self.kernel_length})"
+            )
         if M + N + self.jtc_separation > self.jtc_total_field:
-            raise ValueError(f"Not enough JTC field: {M} + {N} + {self.jtc_separation} > {self.jtc_total_field}")
+            raise ValueError(
+                f"Not enough JTC field: {M} + {N} + {self.jtc_separation} > {self.jtc_total_field}"
+            )
 
         # Indices for placement
         kernel_start = 0
@@ -912,8 +934,12 @@ class JTC(nn.Module):
             laser_scale = laser_scale.reshape(B, 1).repeat_interleave(
                 reps_per_batch, dim=0
             )
-        signal_distorted = self.input_distortion(signal_reshaped, laser_scale=laser_scale)
-        kernel_distorted = self.input_distortion(kernel_reshaped, laser_scale=laser_scale)
+        signal_distorted = self.input_distortion(
+            signal_reshaped, laser_scale=laser_scale
+        )
+        kernel_distorted = self.input_distortion(
+            kernel_reshaped, laser_scale=laser_scale
+        )
         input_plane = self.build_input_plane(signal_distorted, kernel_distorted)
 
         # Step 2: FFT to Fourier plane

@@ -272,7 +272,10 @@ def run_full_strength_inference(
             "[INFO] Running inference with all distortion strength parameters set to 1.0"
         )
         acc = evaluate(
-            ref_model, dataloader, device, max_batches=getattr(config, "max_eval_batches", None)
+            ref_model,
+            dataloader,
+            device,
+            max_batches=getattr(config, "max_eval_batches", None),
         )
     finally:
         if device.type == "cuda":
@@ -482,9 +485,9 @@ def train_onn_model(config: AppConfig) -> float:
             best_test_snapshot = {
                 "epoch": epoch,
                 "train_acc": float(train_acc),
-                "train_eval_loss": float(train_eval_loss)
-                if train_eval_loss is not None
-                else None,
+                "train_eval_loss": (
+                    float(train_eval_loss) if train_eval_loss is not None else None
+                ),
                 "train_loss": float(train_loss),
                 "test_acc": float(test_acc),
                 "test_loss": float(test_loss) if test_loss is not None else None,
@@ -521,9 +524,9 @@ def train_onn_model(config: AppConfig) -> float:
         "final": {
             "epoch": (config.num_epochs - 1) if config.num_epochs > 0 else -1,
             "train_acc": float(train_acc) if train_acc is not None else None,
-            "train_eval_loss": float(train_eval_loss)
-            if train_eval_loss is not None
-            else None,
+            "train_eval_loss": (
+                float(train_eval_loss) if train_eval_loss is not None else None
+            ),
             "train_loss": float(train_loss) if train_loss is not None else None,
             "test_acc": float(last_epoch_test_acc) if config.num_epochs > 0 else None,
         },

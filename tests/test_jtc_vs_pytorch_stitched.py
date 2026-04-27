@@ -39,8 +39,9 @@ def pytorch_conv2d_reference(image: torch.Tensor, kernel: torch.Tensor) -> torch
     return output.squeeze()
 
 
-def jtc_conv1d_single_pass(signal: torch.Tensor, kernel: torch.Tensor,
-                           config: AppConfig, jtc: JTC) -> torch.Tensor:
+def jtc_conv1d_single_pass(
+    signal: torch.Tensor, kernel: torch.Tensor, config: AppConfig, jtc: JTC
+) -> torch.Tensor:
     """Perform single JTC pass for 1D convolution.
 
     Args:
@@ -62,8 +63,9 @@ def jtc_conv1d_single_pass(signal: torch.Tensor, kernel: torch.Tensor,
     return output.squeeze()
 
 
-def jtc_conv2d_with_stitching(image: torch.Tensor, kernel_2d: torch.Tensor,
-                               config: AppConfig) -> torch.Tensor:
+def jtc_conv2d_with_stitching(
+    image: torch.Tensor, kernel_2d: torch.Tensor, config: AppConfig
+) -> torch.Tensor:
     """Perform 2D convolution using JTC with row-wise stitching.
 
     Simulates the actual hardware operation:
@@ -146,7 +148,9 @@ def jtc_conv2d_with_stitching(image: torch.Tensor, kernel_2d: torch.Tensor,
                 for i in range(outputs_to_use):
                     if out_col + i < out_w:
                         # The i-th output corresponds to position patch_start + output_start_in_patch + i
-                        output[out_row, out_col + i] += jtc_output[output_start_in_patch + i]
+                        output[out_row, out_col + i] += jtc_output[
+                            output_start_in_patch + i
+                        ]
 
                 out_col += outputs_to_use
                 pass_idx += 1
@@ -214,26 +218,31 @@ class TestJTCVsPyTorchStitched:
         # Note: JTC outputs magnitudes, so can only match if inputs are positive
         if clean == total:  # All outputs clean
             torch.testing.assert_close(
-                jtc_output[:len(pytorch_output)],
+                jtc_output[: len(pytorch_output)],
                 pytorch_output,
                 rtol=1e-3,  # 0.1% relative tolerance
                 atol=1e-4,  # Absolute tolerance
-                msg="JTC should match PyTorch for positive inputs with zero contamination"
+                msg="JTC should match PyTorch for positive inputs with zero contamination",
             )
         else:
-            print(f"  ⚠ Config has contamination: {total-clean}/{total} contaminated outputs")
+            print(
+                f"  ⚠ Config has contamination: {total - clean}/{total} contaminated outputs"
+            )
 
-    @pytest.mark.parametrize("M,N,plane,sep", [
-        (8, 3, 32, 7),    # Zero contamination
-        (16, 8, 64, 15),  # Zero contamination
-    ])
+    @pytest.mark.parametrize(
+        "M,N,plane,sep",
+        [
+            (8, 3, 32, 7),  # Zero contamination
+            (16, 8, 64, 15),  # Zero contamination
+        ],
+    )
     def test_jtc_1d_clean_configs(self, M, N, plane, sep):
         """Test JTC matches PyTorch for configs with zero contamination."""
         total, clean, stride = compute_contamination_profile(M, N, plane, sep)
 
         # Only test clean configs
         if clean < total:
-            pytest.skip(f"Config has contamination: {total-clean}/{total} outputs")
+            pytest.skip(f"Config has contamination: {total - clean}/{total} outputs")
 
         config = AppConfig(
             input_length=M,
@@ -269,7 +278,7 @@ class TestJTCVsPyTorchStitched:
 
         # Tight tolerance for zero contamination
         torch.testing.assert_close(
-            jtc_output[:len(pytorch_output)],
+            jtc_output[: len(pytorch_output)],
             pytorch_output,
             rtol=1e-3,
             atol=1e-4,
@@ -286,8 +295,8 @@ class TestJTCVsPyTorchStitched:
 
         print(f"\nConfig: M={M}, N={N}, plane={plane}, sep={sep}")
         print(f"  Total outputs: {total}")
-        print(f"  Clean outputs: {clean} ({100*clean/total:.1f}%)")
-        print(f"  Contaminated:  {contaminated} ({100*contaminated/total:.1f}%)")
+        print(f"  Clean outputs: {clean} ({100 * clean / total:.1f}%)")
+        print(f"  Contaminated:  {contaminated} ({100 * contaminated / total:.1f}%)")
         print(f"  Effective stride for stitching: {stride}")
 
         # Verify we report this correctly
@@ -298,7 +307,7 @@ class TestJTCVsPyTorchStitched:
         if contaminated > 0:
             print(f"  ⚠ {contaminated} outputs have autocorr contamination")
             print(f"  → Use effective_stride={stride} for tile stitching")
-            print(f"  → Or use larger plane_size/separation for cleaner outputs")
+            print("  → Or use larger plane_size/separation for cleaner outputs")
 
 
 if __name__ == "__main__":
