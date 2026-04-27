@@ -1,137 +1,150 @@
 # ONN-Flex
-A standard interface for modeling photonic JTC based neural networks.
 
-# Training
+ONN-Flex models photonic joint-transform-correlator (JTC) convolution layers
+inside small neural-network experiments. The main entry point is `onn_main.py`;
+YAML files in `configs/` define optical geometry, quantization, hardware
+distortions, and training settings.
 
-## Standard Training
+## Quick Start
+
+Activate the project environment, then run a baseline JTC training job:
+
 ```bash
-python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_ideal/ --jtc-separation 8 --jtc-total-field 48 --batch-size 128
-```
+conda activate onn-torch
 
-## Training with PyTorch Conv (Alternative to JTC)
-```bash
-python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_pytorch/ --conv-backend pytorch --batch-size 128
-```
-
-## Training with Fourier Conv (FFT-based alternative to JTC)
-```bash
 python onn_main.py \
   --config-file configs/config_ideal.yaml \
-  --output-dir runs/runs_fft/ \
-  --conv-backend fourier \
+  --output-dir runs/runs_ideal \
   --batch-size 128
 ```
 
-### Optional: Quantize the Fourier plane
+## Training Modes
+
+### JTC Emulation
+
 ```bash
 python onn_main.py \
   --config-file configs/config_ideal.yaml \
-  --output-dir runs/runs_fft_q/ \
+  --output-dir runs/runs_ideal \
+  --conv-backend jtc_emulation \
+  --batch-size 128
+```
+
+### PyTorch Reference Convolution
+
+```bash
+python onn_main.py \
+  --config-file configs/config_ideal.yaml \
+  --output-dir runs/runs_pytorch \
+  --conv-backend pytorch \
+  --batch-size 128
+```
+
+### Fourier Reference Convolution
+
+```bash
+python onn_main.py \
+  --config-file configs/config_ideal.yaml \
+  --output-dir runs/runs_fft \
   --conv-backend fourier \
   --fourier-plane-bits 6 \
   --batch-size 128
 ```
 
-## Run only pretrain tests
+### Evaluation Only
+
 ```bash
-python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/pretrain_only/ --pretrain-tests-only
+python onn_main.py \
+  --config-file runs/runs_ideal/final_config.yaml \
+  --output-dir runs/runs_ideal_eval \
+  --eval-only \
+  --pretrained-weights runs/runs_ideal/fftconv_checkpoint.pth
 ```
 
-## Quantlevel sweep (ste_maxscale, 8 GPUs)
+### Pretrain Diagnostics Only
+
+```bash
+python onn_main.py \
+  --config-file configs/config_ideal.yaml \
+  --output-dir runs/pretrain_only \
+  --pretrain-tests-only
+```
+
+## Gen 2.5 FPGA
+
+The FPGA path is enabled by `use_fpga_accelerator: true` in
+`configs/config_fpga_g2p5.yaml`:
+
+```bash
+python onn_main.py \
+  --config-file configs/config_fpga_g2p5.yaml \
+  --output-dir runs/runs_fpga_g2p5
+```
+
+The FPGA config uses `input_length=8`, `kernel_length=8`,
+`jtc_total_field=16`, and `jtc_separation=0`. For 32x32 inputs, the largest
+`FFTConvNet` JTC calls produce `256 * batch_size` shots, so `batch_size=64`
+keeps the accelerator input within `16384 x 16`.
+
+The hardware integration boundary is `JTC.call_fpga_accelerator_uint16()` in
+`onn_component.py`. It receives `accelerator_input_uint16` with shape
+`[shots, 16]` and must return `accelerator_output_uint16` with shape
+`[shots, 16]`. The wrapper converts the returned `uint16` codes back to
+`float32` model-domain values before correlation-index selection. Until this
+function is wired to hardware, FPGA runs intentionally raise
+`NotImplementedError`.
+
+## Analysis Scripts
+
+### Quantization-Level Sweep
+
 ```bash
 python scripts/sweep_quantlevel_ste_maxscale.py --gpus 0,1,2,3,4,5,6,7
 ```
 
-# Distortion Sweep Analysis
+### Distortion Sweep
 
-The distortion sweep script analyzes the impact of various hardware distortions on model performance, generating both accuracy and SNDR (Signal-to-Noise and Distortion Ratio) plots.
+Run inference sweeps and generate plots:
 
-## Full Distortion Sweep (Run inference and generate plots)
 ```bash
-python scripts/distortion_sweep.py --config runs/runs_ideal/final_config.yaml --weights runs/runs_ideal/fftconv_checkpoint.pth --output-dir sweep_results/
+python scripts/distortion_sweep.py \
+  --config runs/runs_ideal/final_config.yaml \
+  --weights runs/runs_ideal/fftconv_checkpoint.pth \
+  --output-dir sweep_results
 ```
 
-## Plot-Only Mode (Generate plots from existing data)
+Regenerate plots from existing sweep data:
+
 ```bash
-python scripts/distortion_sweep.py --plot-only --output-dir sweep_results/
+python scripts/distortion_sweep.py --plot-only --output-dir sweep_results
 ```
 
-## Features
+Distortion sweep outputs include `{param}_results.txt`, `{param}_sweep.pdf`,
+`jtc_2d_accuracy.npy/.txt`, `jtc_2d_sndr_output.npy/.txt`, and 2D JTC geometry
+heatmaps.
 
-### Generated Outputs
-- **1D Parameter Sweeps**: Plots showing accuracy and SNDR vs. distortion strength for:
-  - Driver distortion
-  - PD distortion
-  - TIA distortion
-  - MRM power distortion
-  - MRM phase distortion
-- **2D JTC Geometry Sweep**: Heatmaps showing accuracy and SNDR vs. JTC separation and total field size
+### One-Hot Distortion Runs
 
-### Plot-Only Mode Benefits
-- **Fast plot regeneration**: Create updated plots without expensive re-inference
-- **Styling updates**: Apply plot terminology and formatting changes to existing data
-- **Selective plotting**: Generate only the plots you need
+One-hot runs evaluate or train with one distortion source enabled at a time, plus
+all-zeros and all-ones cases. A base run directory must contain
+`final_config.yaml` and `fftconv_checkpoint.pth`.
 
-### Data Files Generated
-- `{param}_results.txt`: Tabulated results for each distortion parameter
-- `{param}_sweep.pdf`: 1D plots showing accuracy and SNDR vs. distortion strength
-- `jtc_2d_accuracy.npy/.txt`: 2D accuracy matrix for JTC geometry sweep
-- `jtc_2d_sndr_output.npy/.txt`: 2D SNDR matrix for JTC geometry sweep
-- `jtc_2d_sweep_accuracy.pdf`: 2D accuracy heatmap
-- `jtc_2d_sweep_output_sndr.pdf`: 2D SNDR heatmap
-
-### Example Workflow
 ```bash
-# 1. Run full sweep (takes time)
-python scripts/distortion_sweep.py --config config.yaml --weights model.pth --output-dir results/
+python scripts/one_hot_distortion_runs.py \
+  --base-run runs/runs_ideal_0825 \
+  --do-infer
 
-# 2. Later, regenerate plots with updated styling (fast)
-python scripts/distortion_sweep.py --plot-only --output-dir results/
+python scripts/one_hot_distortion_runs.py \
+  --base-run runs/runs_ideal_0825 \
+  --do-train \
+  --epochs 20
+
+python scripts/one_hot_distortion_runs.py \
+  --base-run runs/runs_ideal_0825 \
+  --do-finetune \
+  --finetune-additional-epochs 5 \
+  --finetune-lr 5e-4
 ```
 
-# One‑Hot Distortion Runs
-
-Iterate through each distortion strength by setting one parameter to 1.0 at a time (others 0.0), then run a case with all distortion strengths at 1.0. A baseline all‑zeros case is also run in the selected modes. Supports inference (using a pretrained ideal run), training from scratch, and fine‑tuning.
-
-## Requirements
-- A pretrained ideal run directory (e.g., `runs/runs_ideal_0825`) containing:
-  - `final_config.yaml`
-  - `fftconv_checkpoint.pth`
-
-## Inference only
-```bash
-python scripts/one_hot_distortion_runs.py --base-run runs/runs_ideal_0825 --do-infer
-```
-Runs: `infer/all-zeros`, each one‑hot case, and `infer/all-ones`.
-
-## Training only
-```bash
-python scripts/one_hot_distortion_runs.py --base-run runs/runs_ideal_0825 --do-train --epochs 20
-```
-Runs: `train/all-zeros` (baseline), each one‑hot case, and `train/all-ones`.
-
-## Inference and training
-```bash
-python scripts/one_hot_distortion_runs.py --base-run runs/runs_ideal_0825 --do-infer --do-train --epochs 20
-```
-Runs all the above inference and training baselines and sweeps.
-
-## Fine‑tuning from the checkpoint
-Fine‑tune the all‑zeros baseline, each one‑hot case, and the all‑ones case initialized from the base run checkpoint. The additional epochs apply equally to keep baseline epoch parity:
-```bash
-python scripts/one_hot_distortion_runs.py --base-run runs/runs_ideal_0825 --do-finetune --finetune-additional-epochs 5 --finetune-lr 5e-4
-```
-
-## Outputs
-- Results are written under `runs/<base>_onehots/` by default (override with `--output-root`).
-- Structure:
-  - `infer/all-zeros/{config.yaml, metrics.txt}`
-  - `infer/<param-case>/{config.yaml, metrics.txt}`
-  - `infer/all-ones/{config.yaml, metrics.txt}`
-  - `train/all-zeros/{config.yaml, fftconv_checkpoint.pth, ...}`
-  - `train/<param-case>/{config.yaml, fftconv_checkpoint.pth, ...}`
-  - `train/all-ones/{config.yaml, fftconv_checkpoint.pth, ...}`
-  - `finetune/all-zeros/{config.yaml, fftconv_checkpoint.pth, ...}`
-  - `finetune/<param-case>/{config.yaml, fftconv_checkpoint.pth, ...}`
-  - `finetune/all-ones/{config.yaml, fftconv_checkpoint.pth, ...}`
-  - `summary.txt` with a concise per‑case summary
+Results are written under `runs/<base>_onehots/` by default and include per-case
+configs, metrics, checkpoints for train/finetune modes, and `summary.txt`.

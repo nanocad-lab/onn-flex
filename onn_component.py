@@ -721,6 +721,84 @@ class JTC(nn.Module):
         input_plane[..., signal_start:signal_end] = signal
         return input_plane
 
+    def pack_input_plane_uint16(self, input_plane: torch.Tensor) -> torch.Tensor:
+        """Pack the JTC input plane into the uint16 payload expected by FPGA I/O."""
+        payload = (
+            torch.abs(input_plane) if torch.is_complex(input_plane) else input_plane
+        )
+        levels = float(torch.iinfo(torch.uint16).max)
+        quantized = torch.round(torch.clamp(payload, 0.0, 1.0) * levels)
+        return quantized.to(torch.uint16)
+
+    def call_fpga_accelerator_uint16(
+        self, accelerator_input_uint16: torch.Tensor
+    ) -> torch.Tensor:
+        """Placeholder call boundary for the Gen 2.5 FPGA accelerator."""
+        if accelerator_input_uint16.dtype != torch.uint16:
+            raise TypeError(
+                "Gen 2.5 FPGA input must be torch.uint16; "
+                f"got {accelerator_input_uint16.dtype}."
+            )
+        if accelerator_input_uint16.shape[-1] != 16:
+            raise ValueError(
+                "Gen 2.5 FPGA input must have shape [shots, 16]; "
+                f"got {tuple(accelerator_input_uint16.shape)}."
+            )
+
+        # ######################################################################
+        # FPGA Gen 2.5 CALL PLACEHOLDER
+        # GIVEN:
+        # - `accelerator_input_uint16`: torch.uint16, shape [shots, 16].
+        # - `shots <= 16384`.
+        # - Values are clamped to [0, 1] and packed as round(x * 65535).
+        # EXPECTED:
+        # - Send `accelerator_input_uint16` to the accelerator.
+        # - Accelerator should interpret each row as one 16-point input plane.
+        # - Return `accelerator_output_uint16`: torch.uint16, shape [shots, 16],
+        #   after post-PD quantization.
+        # ######################################################################
+
+        raise NotImplementedError(
+            "Gen 2.5 FPGA accelerator call is a placeholder. Wire this function "
+            "to return uint16 output codes with shape [shots, 16]."
+        )
+
+    def unpack_fpga_output_uint16(self, output_codes: torch.Tensor) -> torch.Tensor:
+        """Unpack uint16 FPGA output codes back into the model domain."""
+        levels = float(torch.iinfo(torch.uint16).max)
+        return output_codes.to(torch.float32) / levels
+
+    def fpga_accelerator_forward(self, input_plane: torch.Tensor) -> torch.Tensor:
+        """Placeholder for the Gen 2.5 FPGA JTC accelerator integration."""
+        if input_plane.shape[-1] != 16:
+            raise ValueError(
+                "Gen 2.5 FPGA path expects jtc_total_field=16 so the input plane "
+                f"has width 16; got width {input_plane.shape[-1]}."
+            )
+        if input_plane.shape[0] > 16384:
+            raise ValueError(
+                "Gen 2.5 FPGA path supports at most 16384 input-plane rows; "
+                f"got {input_plane.shape[0]}."
+            )
+
+        accelerator_input_uint16 = self.pack_input_plane_uint16(input_plane)
+        accelerator_output_uint16 = self.call_fpga_accelerator_uint16(
+            accelerator_input_uint16
+        )
+        if accelerator_output_uint16.dtype != torch.uint16:
+            raise TypeError(
+                "Gen 2.5 FPGA output must be torch.uint16; "
+                f"got {accelerator_output_uint16.dtype}."
+            )
+        if accelerator_output_uint16.shape != input_plane.shape:
+            raise ValueError(
+                "Gen 2.5 FPGA output must have shape [shots, 16]; "
+                f"got {tuple(accelerator_output_uint16.shape)}."
+            )
+
+        output_plane = self.unpack_fpga_output_uint16(accelerator_output_uint16)
+        return output_plane.to(device=input_plane.device)
+
     def scale_to_range(
         self, tensor: torch.Tensor, min_val: float = -30, max_val: float = -20
     ) -> torch.Tensor:
@@ -941,6 +1019,17 @@ class JTC(nn.Module):
             kernel_reshaped, laser_scale=laser_scale
         )
         input_plane = self.build_input_plane(signal_distorted, kernel_distorted)
+
+        if getattr(self.config, "use_fpga_accelerator", False):
+            output_plane = self.fpga_accelerator_forward(input_plane)
+            indices = self.compute_correlation_indices(output_plane.device)
+            output = output_plane[..., indices]
+            return output.reshape(
+                signal_full.shape[0],
+                signal_full.shape[1],
+                signal_full.shape[2],
+                self.output_length,
+            )
 
         # Step 2: FFT to Fourier plane
         jft = self.fft_and_magnitude(input_plane)

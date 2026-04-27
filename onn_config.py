@@ -37,6 +37,7 @@ class AppConfig:
     output_length: int | None = None  # length of output (auto-calculated if None)
     jtc_separation: int = 0  # separation between kernel and signal
     jtc_total_field: int = 16  # total size of the JTC plane (lens size)
+    use_fpga_accelerator: bool = False
 
     # Lens model (optional)
     # Models a unitary lens operator using a 1-D Legendre basis and coefficients.
