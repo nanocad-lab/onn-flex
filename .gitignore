@@ -12,6 +12,11 @@ data/
 # results
 runs/
 runs_mfd/
+testout/
+sweep_results/
+*.log
+*.out
+*.pth
 
 # Distribution / packaging
 .Python

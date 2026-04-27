@@ -33,7 +33,7 @@ def profile_training() -> None:
     config.run_pretrain_tests = False
 
     # Get data
-    trainloader, _ = get_data_loaders(config.batch_size)
+    trainloader, _, _ = get_data_loaders(config.batch_size)
     model = FFTConvNet(config).to(device)
 
     # Profiler setup

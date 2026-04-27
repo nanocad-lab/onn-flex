@@ -1,30 +1,115 @@
-from typing import Tuple
+import math
 
-from onn_config import AppConfig
-import torch
-import torch.nn as nn
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn as nn
 from sklearn.metrics import r2_score
-import math
-from jtc_cycle_planner import compute_contamination_profile
 
-# NEW: Helper functions to compute ideal (reference) transfer function coefficients
+from jtc_cycle_planner import compute_contamination_profile
+from onn_config import AppConfig
+
+
+def _legendre_torch(n: int, x: torch.Tensor) -> torch.Tensor:
+    """Compute the n-th Legendre polynomial P_n(x) for a 1-D tensor x."""
+    if n == 0:
+        return torch.ones_like(x)
+    if n == 1:
+        return x.clone()
+    p0 = torch.ones_like(x)
+    p1 = x.clone()
+    for k in range(2, n + 1):
+        p0, p1 = p1, ((2 * k - 1) * x * p1 - (k - 1) * p0) / k
+    return p1
+
+
+class LensLegendre(nn.Module):
+    """Unitary lens operator parameterized by a 1-D Legendre basis."""
+
+    def __init__(self, config: AppConfig, length: int):
+        super().__init__()
+        self.config = config
+        self.length = int(length)
+        self.order = int(getattr(config, "lens_legendre_order", 0) or 0)
+
+        if self.order <= 0 or self.length <= 0:
+            self.register_buffer(
+                "basis",
+                torch.empty(0, self.length, dtype=torch.float32),
+                persistent=False,
+            )
+            self.register_buffer(
+                "base_coefs", torch.empty(0, dtype=torch.float32), persistent=False
+            )
+            return
+
+        raw = getattr(config, "lens_coefs", None) or []
+        if isinstance(raw, (int, float, str)):
+            raw = [raw]
+        base = [float(value) for value in raw]
+        if len(base) < self.order:
+            base += [0.0] * (self.order - len(base))
+        elif len(base) > self.order:
+            base = base[: self.order]
+
+        self.register_buffer(
+            "base_coefs", torch.as_tensor(base, dtype=torch.float32), persistent=False
+        )
+
+        rho = torch.linspace(-1.0, 1.0, self.length, dtype=torch.float32)
+        terms: list[torch.Tensor] = []
+        for ord_k in range(1, self.order + 1):
+            p = _legendre_torch(ord_k, rho)
+            p = p - p.mean()
+            nrm = torch.linalg.vector_norm(p).item()
+            if nrm > 0:
+                p = p / nrm
+            terms.append(p)
+        basis = torch.stack(terms, dim=0)
+        self.register_buffer("basis", basis, persistent=False)
+
+    def _phase_diag(self, x: torch.Tensor) -> torch.Tensor | None:
+        strength = float(getattr(self.config, "lens_distortion_strength", 0.0) or 0.0)
+        if strength == 0.0 or self.base_coefs.numel() == 0 or self.basis.numel() == 0:
+            return None
+
+        real_dtype = x.real.dtype
+        coefs = (self.base_coefs.to(dtype=real_dtype) * strength).reshape(-1, 1)
+        phase_profile = (self.basis.to(dtype=real_dtype) * coefs).sum(dim=0)
+        phase_diag = torch.polar(torch.ones_like(phase_profile), phase_profile)
+        return phase_diag.to(dtype=x.dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        phase_diag = self._phase_diag(x)
+        if phase_diag is None:
+            return x
+
+        n = x.shape[-1]
+        scale = math.sqrt(float(n))
+        # Apply the unitary similarity transform F diag(e^{iφ}) F^{-1},
+        # where F is the (unitary) forward DFT. This matches the MATLAB
+        # construction used to fit the Legendre coefficients.
+        x_ifft = torch.fft.ifft(x, dim=-1) * scale  # unitary inverse DFT
+        x_ifft = x_ifft * phase_diag
+        return torch.fft.fft(x_ifft, dim=-1) / scale  # unitary forward DFT
 
 
 class QuantDequant_STE(torch.autograd.Function):
-    # version of the MRR LUT but implemented with straight-thourgh estimator to help training
+    """Clamp to [0, 1] and optionally quantize with a straight-through gradient."""
+
     @staticmethod
     def forward(ctx, input: torch.Tensor, bits: int | None) -> torch.Tensor:
-        if bits is None:
-            return input
-        levels = 2**bits
+        # Always enforce the [0,1] full-scale range. When bits=None we disable
+        # quantization noise but still keep the saturating range limiter so that
+        # "no quant" experiments remain physically meaningful.
         input_clamped = torch.clamp(input, 0, 1)
+        if bits is None:
+            return input_clamped
+        levels = 2**bits
         return torch.round(input_clamped * (levels - 1)) / (levels - 1)
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
-        # Return gradients for (input, bits)
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
         return grad_output, None
 
 
@@ -116,7 +201,7 @@ def get_ideal_degree(csv_file: str, max_degree: int = 10) -> int:
     return best_degree if best_degree is not None else 1
 
 
-def get_io_ranges(csv_file: str) -> Tuple[float, float, float, float]:
+def get_io_ranges(csv_file: str) -> tuple[float, float, float, float]:
     data = pd.read_csv(csv_file)
     x = data["input"].values
     y = data["output"].values
@@ -156,71 +241,22 @@ class Driver(nn.Module):
         self.strength: float = float(self.config.driver_distortion_strength)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Polynomial evaluation using Horner's rule
-        # print(f"x shape: {x.shape}")
-        # print(f"x: {x[0]}")
+        strength = float(self.strength)
+        if strength <= 0.0:
+            return self.ideal_coeffs[0] * x + self.ideal_coeffs[1]
+
         poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
-            poly_y = poly_y * x + a
+            poly_y.mul_(x).add_(a)
+
+        if strength >= 1.0:
+            return poly_y
 
         # Ideal linear response
         ideal_y = self.ideal_coeffs[0] * x + self.ideal_coeffs[1]
-        # Blend based on strength
-        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
-        # print(f"ideal_y_shape: {ideal_y.shape}")
-        # print(f"ideal_y: {ideal_y[0]}")
-        # print(f"poly_y: {poly_y[0]}")
-        # input("Press Enter to continue...")
-        return combined_y
-
-
-class PD_TIA(nn.Module):
-    def __init__(self, config: AppConfig):
-        super().__init__()
-        self.config = config
-        self.degree: int = 0
-        if self.config.pd_tia_distortion_data_path is None:
-            raise ValueError("PD-TIA distortion data path is not set")
-        if self.config.pd_tia_distortion_polyfit_order is None:
-            self.degree = get_ideal_degree(self.config.pd_tia_distortion_data_path)
-        else:
-            self.degree = self.config.pd_tia_distortion_polyfit_order
-        coeffs = get_coeffs(self.config.pd_tia_distortion_data_path, self.degree)
-        coeff_tensor = torch.as_tensor(coeffs, dtype=torch.float32)
-        self.register_buffer("coeffs", coeff_tensor)
-
-        # Ideal (reference) quadratic coefficients a, b where y = a * x**2 + b
-        ideal_coeffs = _compute_quadratic_coeffs(
-            self.config.pd_tia_distortion_data_path
-        )
-        self.register_buffer(
-            "ideal_coeffs", torch.as_tensor(ideal_coeffs, dtype=torch.float32)
-        )
-
-        # Distortion strength
-        self.strength: float = float(self.config.pd_tia_distortion_strength)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Polynomial evaluation using Horner's rule
-        x = torch.clamp(x, 1e-6, 1e-5)
-        # print(f"pd_tia x shape: {x.shape}")
-        # print(f"pd_tia x: {x[0]}")
-        # input("Press Enter to continue...")
-        poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
-        for a in self.coeffs:
-            poly_y = poly_y * x + a
-
-        # Ideal quadratic response
-        ideal_y = self.ideal_coeffs[0] * torch.pow(x, 2) + self.ideal_coeffs[1]
-
-        # print(f"ideal_y_shape: {ideal_y.shape}")
-        # print(f"ideal_y: {ideal_y[0]}")
-        # print(f"poly_y: {poly_y[0]}")
-        # input("Press Enter to continue...")
-
-        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
-        combined_y = torch.clamp(combined_y, 0, 1)
-        return combined_y
+        # Blend in-place to reduce peak memory
+        poly_y.mul_(strength).add_(ideal_y, alpha=(1.0 - strength))
+        return poly_y
 
 
 class PD(nn.Module):
@@ -248,15 +284,35 @@ class PD(nn.Module):
         self.strength: float = float(self.config.pd_distortion_strength)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.clamp(x, 1e-6, 1e-5)
+        pd_noise_w = float(getattr(self.config, "pd_noise_w", 0.0) or 0.0)
+        if pd_noise_w > 0:
+            x = x + torch.randn_like(x) * pd_noise_w
+        clamp_min = getattr(self.config, "pd_input_clamp_min_w", 1e-6)
+        clamp_max = getattr(self.config, "pd_input_clamp_max_w", 1e-5)
+        if clamp_min is not None or clamp_max is not None:
+            if clamp_min is None:
+                x = torch.clamp_max(x, float(clamp_max))
+            elif clamp_max is None:
+                x = torch.clamp_min(x, float(clamp_min))
+            else:
+                x = torch.clamp(x, float(clamp_min), float(clamp_max))
+        strength = float(self.strength)
+        if strength <= 0.0:
+            ideal_y = self.ideal_coeffs[0] * torch.pow(x, 2) + self.ideal_coeffs[1]
+            return torch.clamp(ideal_y, 0, 1)
+
         poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
-            poly_y = poly_y * x + a
+            poly_y.mul_(x).add_(a)
+
+        if strength >= 1.0:
+            return torch.clamp(poly_y, 0, 1)
 
         ideal_y = self.ideal_coeffs[0] * torch.pow(x, 2) + self.ideal_coeffs[1]
-        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
-        combined_y = torch.clamp(combined_y, 0, 1)
-        return combined_y
+        # Blend in-place to reduce peak memory
+        poly_y.mul_(strength).add_(ideal_y, alpha=(1.0 - strength))
+        poly_y.clamp_(0, 1)
+        return poly_y
 
 
 class TIA(nn.Module):
@@ -284,14 +340,23 @@ class TIA(nn.Module):
         self.strength: float = float(self.config.tia_distortion_strength)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        strength = float(self.strength)
+        if strength <= 0.0:
+            ideal_y = self.ideal_coeffs[0] * x + self.ideal_coeffs[1]
+            return torch.clamp(ideal_y, 0, 1)
+
         poly_y = torch.zeros_like(x, dtype=self.coeffs.dtype, device=x.device)
         for a in self.coeffs:
-            poly_y = poly_y * x + a
+            poly_y.mul_(x).add_(a)
+
+        if strength >= 1.0:
+            return torch.clamp(poly_y, 0, 1)
 
         ideal_y = self.ideal_coeffs[0] * x + self.ideal_coeffs[1]
-        combined_y = self.strength * poly_y + (1.0 - self.strength) * ideal_y
-        combined_y = torch.clamp(combined_y, 0, 1)
-        return combined_y
+        # Blend in-place to reduce peak memory
+        poly_y.mul_(strength).add_(ideal_y, alpha=(1.0 - strength))
+        poly_y.clamp_(0, 1)
+        return poly_y
 
 
 class MRM(nn.Module):
@@ -308,8 +373,6 @@ class MRM(nn.Module):
         else:
             self.pwr_degree = self.config.mrm_power_polyfit_order
 
-        # Get IO ranges for power
-        # self.pwr_in_min, self.pwr_in_max, self.pwr_out_min, self.pwr_out_max = get_io_ranges(self.config.mrm_power_data_path)
         self.ph_in_min, self.ph_in_max, self.ph_out_min, self.ph_out_max = (
             get_io_ranges(self.config.mrm_phase_data_path)
         )
@@ -343,29 +406,84 @@ class MRM(nn.Module):
         # Distortion strength for phase
         self.phase_strength: float = float(self.config.mrm_phase_distortion_strength)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Polynomial evaluation for power
-        pwr_poly_y = torch.zeros_like(x, dtype=self.pwr_coeffs.dtype, device=x.device)
-        for a in self.pwr_coeffs:
-            pwr_poly_y = pwr_poly_y * x + a
+    def make_laser_scale(self, x: torch.Tensor) -> torch.Tensor | None:
+        """Sample a per-shot (batch-wise) laser intensity scale factor.
 
-        # Ideal linear response for power
-        pwr_ideal_y = self.ideal_pwr_coeffs[0] * x + self.ideal_pwr_coeffs[1]
+        A single laser source is shared across all channels in a shot, so the
+        sampled scale is constant across the channel dimension(s) and varies
+        only across the batch dimension.
 
-        pwr_y = self.pwr_strength * pwr_poly_y + (1.0 - self.pwr_strength) * pwr_ideal_y
+        The scale factor is modeled as log-normal with mean 1.0. The noise
+        magnitude is specified by `config.laser_rin_db`, interpreted as a
+        fractional RMS intensity noise in dB:
+            `laser_rin_db = 20 * log10(rms_fraction)`.
+        """
+        rin_db = getattr(self.config, "laser_rin_db", None)
+        if rin_db is None:
+            return None
+        rin_db = float(rin_db)
+        if x.dim() < 1:
+            return None
+        shape = (x.shape[0],) + (1,) * (x.dim() - 1)
+        rms_fraction = 10 ** (rin_db / 20.0)
+        sigma_log = math.sqrt(math.log1p(rms_fraction**2))
+        eps = torch.randn(shape, device=x.device, dtype=x.dtype)
+        return torch.exp(eps * sigma_log - 0.5 * (sigma_log**2))
+
+    def forward(
+        self, x: torch.Tensor, laser_scale: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        # Power response (Horner's rule). Use branch-shortcuts and in-place ops
+        # to reduce peak memory during training.
+        pwr_strength = float(self.pwr_strength)
+        if pwr_strength <= 0.0:
+            pwr_y = self.ideal_pwr_coeffs[0] * x + self.ideal_pwr_coeffs[1]
+        else:
+            pwr_poly_y = torch.zeros_like(
+                x, dtype=self.pwr_coeffs.dtype, device=x.device
+            )
+            for a in self.pwr_coeffs:
+                pwr_poly_y.mul_(x).add_(a)
+            if pwr_strength >= 1.0:
+                pwr_y = pwr_poly_y
+            else:
+                pwr_ideal_y = self.ideal_pwr_coeffs[0] * x + self.ideal_pwr_coeffs[1]
+                pwr_poly_y.mul_(pwr_strength).add_(
+                    pwr_ideal_y, alpha=(1.0 - pwr_strength)
+                )
+                pwr_y = pwr_poly_y
+
+        # Per-shot global laser noise (shared across channels), applied before splitting/LER.
+        if laser_scale is None:
+            laser_scale = self.make_laser_scale(pwr_y)
+        if laser_scale is not None:
+            if torch.is_tensor(laser_scale):
+                laser_scale = laser_scale.to(device=pwr_y.device, dtype=pwr_y.dtype)
+            else:
+                laser_scale = torch.as_tensor(
+                    laser_scale, device=pwr_y.device, dtype=pwr_y.dtype
+                )
+            pwr_y = pwr_y * laser_scale
 
         # Apply LER variation to MRM power only
         if self.config.ler_std_dev > 0:
             pwr_y = self.ler_variation(pwr_y)
 
-        # Polynomial evaluation for phase
-        phase_poly_y = torch.zeros_like(
-            x, dtype=self.phase_coeffs.dtype, device=x.device
-        )
-        for a in self.phase_coeffs:
-            phase_poly_y = phase_poly_y * x + a
+        gain = float(getattr(self.config, "mrm_power_gain", 1.0) or 1.0)
+        if gain != 1.0:
+            pwr_y = pwr_y * gain
 
-        phase_y = self.phase_strength * phase_poly_y
+        # Phase response
+        phase_strength = float(self.phase_strength)
+        if phase_strength <= 0.0:
+            phase_y = torch.zeros_like(pwr_y)
+        else:
+            phase_poly_y = torch.zeros_like(
+                x, dtype=self.phase_coeffs.dtype, device=x.device
+            )
+            for a in self.phase_coeffs:
+                phase_poly_y.mul_(x).add_(a)
+            phase_y = phase_poly_y.mul_(phase_strength)
 
         return torch.polar(pwr_y, phase_y)
 
@@ -421,43 +539,6 @@ class LER_variation(nn.Module):
 
 
 class JTC(nn.Module):
-    @staticmethod
-    def _compute_usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
-        """Calculate number of usable correlation outputs for given JTC configuration.
-
-        Uses contamination-aware cycle planner to determine clean valid outputs.
-        Accounts for autocorrelation contamination and edge effects.
-
-        Args:
-            input_len: Length of input signal (M)
-            kernel_len: Length of kernel (N)
-            lens_size: Total size of JTC plane
-            sep: Separation between kernel and signal
-
-        Returns:
-            Number of clean valid outputs for stitching (effective stride)
-        """
-        # Validity checks
-        if input_len <= 0 or kernel_len <= 0 or lens_size <= 0:
-            return 0
-        if input_len < kernel_len:
-            return 0
-        if sep < 0:
-            return 0
-
-        # Check if configuration fits in lens plane
-        # Need space for: kernel (N) + separation (sep) + signal (M)
-        if input_len + kernel_len + sep > lens_size:
-            return 0
-
-        # Use contamination-aware cycle planner
-        # Returns: (total_outputs, clean_valid_outputs, effective_stride)
-        _, clean_valid, effective_stride = compute_contamination_profile(
-            input_len, kernel_len, lens_size, sep
-        )
-
-        return effective_stride
-
     def __init__(self, config: AppConfig):
         super(JTC, self).__init__()
         self.config = config
@@ -465,6 +546,7 @@ class JTC(nn.Module):
         self.mrm = MRM(config)
         self.pd = PD(config)
         self.tia = TIA(config)
+        self.lens = LensLegendre(config, length=config.jtc_total_field)
         self.input_length = config.input_length
         self.kernel_length = config.kernel_length
         self.jtc_separation = config.jtc_separation
@@ -536,20 +618,17 @@ class JTC(nn.Module):
             "output_slice",
         ]
 
-    def input_distortion(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply driver and MRM distortion without quantization.
-
-        Note: Quantization should be applied separately before calling this method.
-        """
+    def input_distortion(
+        self, x: torch.Tensor, laser_scale: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Apply DAC quantization, driver response, and MRM modulation."""
+        x = QuantDequant_STE.apply(x, self.config.dac_bits)
         x = self.driver(x)
-        x = self.mrm(x)
+        x = self.mrm(x, laser_scale=laser_scale)
         return x
 
     def output_distortion(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply loss, PD, TIA, and scaling without quantization.
-
-        Note: Quantization should be applied separately after calling this method.
-        """
+        """Apply loss, PD, TIA, scaling, then ADC quantization."""
         x = x * self.loss
         if self.config.scale_output == "pd":
             x = self.scale_to_range(x, 1e-6, 1e-5)
@@ -557,12 +636,14 @@ class JTC(nn.Module):
         x = self.tia(x)
         if self.config.scale_output == "adc":
             x = x / x.max().clamp_min(1e-12)
+        x = QuantDequant_STE.apply(x, self.config.adc_bits)
         return x
 
     def fft_and_magnitude(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply FFT, fftshift, and take magnitude."""
+        """Apply FFT, fftshift, optional lens distortion, then take magnitude."""
         x = torch.fft.fft(x)
         x = torch.fft.fftshift(x)  # DC in center for optical lens
+        x = self.lens(x)
         return torch.abs(x)
 
     def compute_correlation_indices(self, device) -> torch.Tensor:
@@ -570,13 +651,11 @@ class JTC(nn.Module):
 
         Uses extraction formula: same_start = plane_size//2 + sep + N//2
         Extracts output_length indices starting from same_start.
-        Note: Original formula had +1, removed based on empirical analysis.
         """
         plane_size = self.jtc_total_field
         sep = self.jtc_separation
         N = self.kernel_length
 
-        # Extraction formula for correlation output indices
         same_start = plane_size // 2 + sep + N // 2
         indices = torch.arange(
             same_start,
@@ -626,59 +705,6 @@ class JTC(nn.Module):
         input_plane[..., signal_start:signal_end] = signal
         return input_plane
 
-    # Backward compatibility wrappers (deprecated - use new methods instead)
-    def generate_input_plane(
-        self, signal: torch.Tensor, kernel: torch.Tensor
-    ) -> torch.Tensor:
-        """Apply input distortion and build the JTC input plane.
-
-        DEPRECATED: This method is kept for backward compatibility.
-        Use input_distortion() and build_input_plane() separately instead.
-
-        Note: This wrapper applies DAC quantization to maintain backward compatibility.
-        """
-        kernel_quantized = QuantDequant_STE.apply(kernel, self.config.dac_bits)
-        signal_quantized = QuantDequant_STE.apply(signal, self.config.dac_bits)
-        kernel_distorted = self.input_distortion(kernel_quantized)
-        signal_distorted = self.input_distortion(signal_quantized)
-        return self.build_input_plane(signal_distorted, kernel_distorted)
-
-    def post_fft(self, input_plane: torch.Tensor) -> torch.Tensor:
-        """Perform FFT and shift the result.
-
-        DEPRECATED: This method is kept for backward compatibility.
-        Use fft_and_magnitude() or inline torch.fft operations instead.
-        """
-        jft = torch.fft.fft(input_plane)
-        jft = torch.fft.fftshift(jft)
-        return jft
-
-    def post_output_distortion(self, jft: torch.Tensor) -> torch.Tensor:
-        """Apply output distortion after the Fourier plane.
-
-        DEPRECATED: This method is kept for backward compatibility.
-        Use output_distortion(torch.abs(jft)) instead.
-
-        Note: This wrapper applies ADC quantization to maintain backward compatibility.
-        """
-        output = self.output_distortion(torch.abs(jft))
-        return QuantDequant_STE.apply(output, self.config.adc_bits)
-
-    def inverse_output(self, jps: torch.Tensor) -> torch.Tensor:
-        """Propagate back to the detector plane and crop the result.
-
-        DEPRECATED: This method is kept for backward compatibility.
-        The forward method now implements this logic using unified helper methods.
-
-        Note: This wrapper does NOT apply quantization. Use forward() for full pipeline.
-        """
-        jps_distorted = self.input_distortion(jps)
-        output_plane = self.fft_and_magnitude(jps_distorted)
-        output_plane = self.output_distortion(output_plane)
-        output_plane = QuantDequant_STE.apply(output_plane, self.config.adc_bits)
-        indices = self.compute_correlation_indices(output_plane.device)
-        return output_plane[..., indices]
-
     def scale_to_range(
         self, tensor: torch.Tensor, min_val: float = -30, max_val: float = -20
     ) -> torch.Tensor:
@@ -692,7 +718,7 @@ class JTC(nn.Module):
         self,
         signal: torch.Tensor,
         kernel: torch.Tensor,
-        stages: Tuple[str, ...] | None = None,
+        stages: tuple[str, ...] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute intermediate tensors for the requested pipeline stages.
 
@@ -757,15 +783,14 @@ class JTC(nn.Module):
         # For propagation, reuse the complex input plane computed above
         input_plane_full = plane_mrm
 
-        # Fourier plane (FFT + fftshift)
-        jft = torch.fft.fft(input_plane_full)
-        jft = torch.fft.fftshift(jft)
+        # Fourier plane (FFT + fftshift + optional lens distortion)
+        jps_mag = self.fft_and_magnitude(input_plane_full)
         if "jps_raw" in stages:
-            results["jps_raw"] = torch.abs(jft)[0, :].detach()
+            results["jps_raw"] = jps_mag[0, :].detach()
 
         # Output distortion (first pass)
-        # Apply loss then PD/TIA
-        jps_base = torch.abs(jft) * self.loss
+        # Apply loss, then PD and TIA.
+        jps_base = jps_mag * self.loss
 
         if self.config.scale_output == "pd":
             jps_base = self.scale_to_range(jps_base, 1e-6, 1e-5)
@@ -791,9 +816,10 @@ class JTC(nn.Module):
         if "jps_quant" in stages:
             results["jps_quant"] = jps_quant[0, :].detach()
 
-        # Input distortion again before inverse FFT (second pass)
-        # No additional quantization - just driver and MRM
-        jps_driver = self.driver(jps_quant)
+        # Input distortion again before inverse FFT (second pass). DAC
+        # quantization is applied first for this JTC pipeline.
+        jps_dac = QuantDequant_STE.apply(jps_quant, self.config.dac_bits)
+        jps_driver = self.driver(jps_dac)
         if "jps_driver" in stages:
             results["jps_driver"] = jps_driver[0, :].detach()
         jps_complex = self.mrm(jps_driver)
@@ -806,9 +832,8 @@ class JTC(nn.Module):
         # jps_complex already includes both components
 
         # Back to detector plane
-        output_plane = torch.fft.fft(jps_complex)
-        output_plane = torch.fft.fftshift(output_plane)
-        output_raw = torch.abs(output_plane) * self.loss
+        output_mag = self.fft_and_magnitude(jps_complex)
+        output_raw = output_mag * self.loss
         if "output_raw" in stages:
             results["output_raw"] = output_raw[0, :].detach()
 
@@ -846,16 +871,14 @@ class JTC(nn.Module):
         """Joint Transform Correlator forward pass.
 
         Pipeline:
-        1. DAC quantization (dac_bits)
-        2. Input distortion (driver + MRM)
-        3. FFT to Fourier plane
-        4. Output distortion (loss + PD + TIA + scale)
-        5. Fourier plane quantization (fourier_plane_bits)
-        6. Input distortion (driver + MRM)
-        7. FFT to detector plane
-        8. Output distortion (loss + PD + TIA + scale)
-        9. ADC quantization (adc_bits)
-        10. Index selection
+        1. Input distortion (DAC quant + driver + MRM + optional laser_rin_db)
+        2. FFT to Fourier plane
+        3. Output distortion (loss + PD + optional pd_noise_w + TIA + scale + ADC quant)
+        4. Fourier plane quantization (fourier_plane_bits)
+        5. Input distortion again (DAC quant + driver + MRM + optional laser_rin_db)
+        6. FFT to detector plane
+        7. Output distortion again (loss + PD + optional pd_noise_w + TIA + scale + ADC quant)
+        8. Index selection
 
         Args:
             signal: Input signal tensor (B, H, 1, W)
@@ -864,6 +887,9 @@ class JTC(nn.Module):
         Returns:
             Correlation output tensor (B, H, Cout, W)
         """
+        B, H = int(signal.shape[0]), int(signal.shape[1])
+        Cout = int(kernel.shape[0])
+        reps_per_batch = int(H * Cout)
         # Reshape inputs for batch processing
         signal_full = signal.repeat(1, 1, kernel.shape[0], 1)
         kernel_full = kernel.repeat(signal.shape[0], signal.shape[1], 1, 1)
@@ -873,37 +899,51 @@ class JTC(nn.Module):
         signal_reshaped = signal_full.reshape(batch_size_for_jtc, self.input_length)
         kernel_reshaped = kernel_full.reshape(batch_size_for_jtc, self.kernel_length)
 
-        # Step 1: DAC quantization
-        signal_quantized = QuantDequant_STE.apply(signal_reshaped, self.config.dac_bits)
-        kernel_quantized = QuantDequant_STE.apply(kernel_reshaped, self.config.dac_bits)
-
-        # Step 2: Input distortion (signal & kernel)
-        signal_distorted = self.input_distortion(signal_quantized)
-        kernel_distorted = self.input_distortion(kernel_quantized)
+        # Step 1: Input distortion (signal & kernel)
+        # Laser noise is global per shot: sample once per batch element and
+        # broadcast across all MRM channels (including all output channels and
+        # spatial rows in this JTC call).
+        laser_scale = self.mrm.make_laser_scale(
+            torch.empty(
+                B, 1, device=signal_reshaped.device, dtype=signal_reshaped.dtype
+            )
+        )
+        if laser_scale is not None:
+            laser_scale = laser_scale.reshape(B, 1).repeat_interleave(
+                reps_per_batch, dim=0
+            )
+        signal_distorted = self.input_distortion(signal_reshaped, laser_scale=laser_scale)
+        kernel_distorted = self.input_distortion(kernel_reshaped, laser_scale=laser_scale)
         input_plane = self.build_input_plane(signal_distorted, kernel_distorted)
 
-        # Step 3: FFT to Fourier plane
+        # Step 2: FFT to Fourier plane
         jft = self.fft_and_magnitude(input_plane)
 
-        # Step 4: Output distortion
+        # Step 3: Output distortion
         jps = self.output_distortion(jft)
 
-        # Step 5: Fourier plane quantization
+        # Step 4: Fourier plane quantization
         jps = QuantDequant_STE.apply(jps, self.config.fourier_plane_bits)
 
-        # Step 6: Input distortion (no quantization before this)
-        jps_distorted = self.input_distortion(jps)
+        # Step 5: Input distortion (DAC quantization + driver/MRM)
+        # Second pass occurs at a different time, so re-sample laser noise from
+        # the same distribution (do not reuse the first-pass sample).
+        laser_scale_2 = self.mrm.make_laser_scale(
+            torch.empty(B, 1, device=jps.device, dtype=jps.dtype)
+        )
+        if laser_scale_2 is not None:
+            laser_scale_2 = laser_scale_2.reshape(B, 1).repeat_interleave(
+                reps_per_batch, dim=0
+            )
+        jps_distorted = self.input_distortion(jps, laser_scale=laser_scale_2)
 
-        # Step 7: FFT to detector plane
+        # Step 6: FFT to detector plane
         output_plane = self.fft_and_magnitude(jps_distorted)
 
-        # Step 8: Output distortion
+        # Step 7: Output distortion
         output_plane = self.output_distortion(output_plane)
 
-        # Step 9: ADC quantization
-        output_plane = QuantDequant_STE.apply(output_plane, self.config.adc_bits)
-
-        # Step 10: Index selection
+        # Step 8: Index selection
         indices = self.compute_correlation_indices(output_plane.device)
         output = output_plane[..., indices]
 

@@ -2,18 +2,16 @@ import argparse
 import csv
 import math
 import sys
-from typing import Iterable, Optional, Sequence
+from collections.abc import Iterable, Sequence
 
-#CIFAR10 size
 HEIGHT = 32
 WIDTH = 32
 KERNEL_HEIGHT = 3
 
-# Contamination threshold for considering outputs "clean"
-CONTAMINATION_THRESHOLD_PCT = 10.0  # 10% max autocorrelation contamination
 
-
-def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: int, sep: int) -> tuple[int, int, int]:
+def compute_contamination_profile(
+    input_len: int, kernel_len: int, lens_size: int, sep: int
+) -> tuple[int, int, int]:
     """Compute contamination profile for JTC configuration.
 
     Physics: JTC output = autocorr(signal) + autocorr(kernel) + cross-correlation
@@ -58,7 +56,7 @@ def compute_contamination_profile(input_len: int, kernel_len: int, lens_size: in
         dist_from_center = min(
             abs(idx - autocorr_center),
             abs(idx - autocorr_center + lens_size),
-            abs(idx - autocorr_center - lens_size)
+            abs(idx - autocorr_center - lens_size),
         )
 
         # Clean if distance > half autocorr length
@@ -122,7 +120,7 @@ def cycles_for_config(
     kernel_len: int,
     lens_size: int,
     sep: int,
-) -> Optional[tuple[int, int, int, int]]:
+) -> tuple[int, int, int, int] | None:
     """Compute cycles needed for image convolution with tile stitching.
 
     For a 32x32 image with 3x3 kernel:
@@ -136,7 +134,7 @@ def cycles_for_config(
         (passes_per_width, total_cycles, effective_stride, total_outputs)
         or None if configuration is invalid
     """
-    total_outputs, clean_outputs, effective_stride = compute_contamination_profile(
+    total_outputs, _, effective_stride = compute_contamination_profile(
         input_len, kernel_len, lens_size, sep
     )
 
@@ -164,7 +162,7 @@ def sweep(
     input_lengths: Iterable[int],
     kernel_lengths: Iterable[int],
     lens_sizes: Iterable[int],
-    separations: Optional[Iterable[int]],
+    separations: Iterable[int] | None,
     output_path: str,
 ) -> None:
     fieldnames = [
@@ -232,7 +230,9 @@ def sweep(
             writer.writerows(rows)
 
 
-def _expand_lengths(values: Optional[Sequence[int]], minimum: int, maximum: int) -> list[int]:
+def _expand_lengths(
+    values: Sequence[int] | None, minimum: int, maximum: int
+) -> list[int]:
     if values:
         return sorted(set(int(v) for v in values if v >= minimum and v <= maximum))
     return list(range(minimum, maximum + 1))

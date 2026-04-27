@@ -7,9 +7,9 @@ driver_distortion_polyfit_order: 3
 driver_distortion_strength: 0.0
 input_length: 8
 kernel_length: 8
-output_length: null
 jtc_separation: 8
 jtc_total_field: 48
+output_length: 8
 mrm_phase_data_path: ./component_data/mrm_phase_sim_data.csv
 mrm_phase_distortion_strength: 0.0
 mrm_phase_polyfit_order: null
@@ -17,9 +17,6 @@ mrm_power_data_path: ./component_data/mrm_pwr_w_sim_data.csv
 mrm_power_distortion_strength: 0.0
 mrm_power_polyfit_order: null
 output_dir: tempdir
-pd_tia_distortion_data_path: ./component_data/pd_tia_corr_sim_data.csv
-pd_tia_distortion_polyfit_order: null
-pd_tia_distortion_strength: 0.0
 pd_distortion_data_path: ./component_data/pd_sim_data.csv
 pd_distortion_polyfit_order: null
 pd_distortion_strength: 0.0
@@ -27,6 +24,11 @@ tia_distortion_data_path: ./component_data/tia_sim_data.csv
 tia_distortion_polyfit_order: null
 tia_distortion_strength: 0.0
 ler_std_dev: 0.0
+laser_rin_db: null
+pd_noise_w: 0.0
+lens_distortion_strength: 0.0
+lens_legendre_order: 2
+lens_coefs: [-2.772300, -1.266519]
 conv_backend: jtc_emulation
 num_identical_layers: 1
 num_epochs: 20

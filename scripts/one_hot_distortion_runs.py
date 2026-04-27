@@ -21,7 +21,6 @@ import os
 import sys
 from dataclasses import replace, asdict
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
 
 # Ensure repository root is importable when run directly
 if __package__ is None or __package__ == "":
@@ -30,18 +29,18 @@ if __package__ is None or __package__ == "":
 import yaml
 
 from onn_config import AppConfig
+from onn_config import load_app_config_from_yaml
 from onn_inference import load_config_from_yaml, run_inference
 from onn_train import train_onn_model
 
 
-# Distortion strength fields to toggle. Excludes pd_tia_distortion_strength
-# because the current JTC pipeline uses separate PD and TIA stages.
-DISTORTION_STRENGTH_KEYS: List[str] = [
+DISTORTION_STRENGTH_KEYS: list[str] = [
     "driver_distortion_strength",
     "pd_distortion_strength",
     "tia_distortion_strength",
     "mrm_power_distortion_strength",
     "mrm_phase_distortion_strength",
+    "lens_distortion_strength",
 ]
 
 
@@ -56,15 +55,7 @@ def _read_base_config(base_run_dir: str) -> AppConfig:
 
     cfg_path = os.path.join(base_run_dir, "config.yaml")
     try:
-        # In case `config.yaml` contains tagged object YAML, we parse minimally
-        # by loading raw and extracting only AppConfig fields.
-        with open(cfg_path, "r") as f:
-            data = yaml.safe_load(f)
-        if isinstance(data, dict):
-            valid = {
-                k: v for k, v in data.items() if k in AppConfig.__dataclass_fields__
-            }
-            return AppConfig(**valid)
+        return load_app_config_from_yaml(cfg_path)
     except Exception:
         pass
     raise FileNotFoundError(
@@ -78,7 +69,7 @@ def _save_config(cfg: AppConfig, out_dir: str, filename: str = "config.yaml") ->
         yaml.safe_dump(asdict(cfg), f, default_flow_style=False)
 
 
-def _build_cfg_with_strengths(base: AppConfig, kv: Dict[str, float]) -> AppConfig:
+def _build_cfg_with_strengths(base: AppConfig, kv: dict[str, float]) -> AppConfig:
     return replace(base, **kv)
 
 
@@ -111,12 +102,12 @@ def _finetune_case(
     out_dir: str,
     weights: str,
     additional_epochs: int = 0,
-    finetune_lr: Optional[float] = None,
+    finetune_lr: float | None = None,
 ) -> None:
     os.makedirs(out_dir, exist_ok=True)
     # Enable fine-tuning from checkpoint
     epochs_for_finetune = (
-        int(additional_epochs) if additional_epochs > 0 else cfg.num_epochs
+        cfg.num_epochs + int(additional_epochs) if additional_epochs > 0 else cfg.num_epochs
     )
     lr = finetune_lr if finetune_lr is not None else cfg.learning_rate
     cfg = replace(
@@ -132,7 +123,7 @@ def _finetune_case(
     train_onn_model(cfg)
 
 
-def _format_case_name(kv: Dict[str, float]) -> str:
+def _format_case_name(kv: dict[str, float]) -> str:
     # Create short, filesystem-friendly name for the case, e.g. driver1.0
     if len(kv) == 1:
         k, v = next(iter(kv.items()))
@@ -146,11 +137,22 @@ def run_one_hot_sweeps(
     do_infer: bool,
     do_train: bool,
     do_finetune: bool,
-    epochs_override: Optional[int],
+    epochs_override: int | None,
     finetune_additional_epochs: int,
-    finetune_lr: Optional[float],
-    include_keys: List[str],
-) -> Tuple[AppConfig, str]:
+    finetune_lr: float | None,
+    no_quant_non_all_ones: bool,
+    include_quant_onehot: bool,
+    all_ones_dac_bits: int | None,
+    all_ones_fourier_plane_bits: int | None,
+    all_ones_adc_bits: int | None,
+    include_keys: list[str],
+    onehot_keys: list[str] | None = None,
+    skip_all_zeros: bool = False,
+    skip_all_ones: bool = False,
+    batch_size_override: int | None = None,
+    max_train_batches: int | None = None,
+    max_eval_batches: int | None = None,
+) -> tuple[AppConfig, str]:
     base_cfg = _read_base_config(base_run_dir)
     weights_path = os.path.join(base_run_dir, "fftconv_checkpoint.pth")
     if not os.path.exists(weights_path) and do_infer:
@@ -161,46 +163,21 @@ def run_one_hot_sweeps(
     # Optionally override epochs for training runs
     if epochs_override is not None:
         base_cfg = replace(base_cfg, num_epochs=int(epochs_override))
+    if batch_size_override is not None:
+        base_cfg = replace(base_cfg, batch_size=int(batch_size_override))
+    if max_train_batches is not None:
+        base_cfg = replace(base_cfg, max_train_batches=int(max_train_batches))
+    if max_eval_batches is not None:
+        base_cfg = replace(base_cfg, max_eval_batches=int(max_eval_batches))
 
     # Ensure output layout exists
     infer_root = os.path.join(output_root, "infer")
     train_root = os.path.join(output_root, "train")
     os.makedirs(output_root, exist_ok=True)
 
-    summary_lines: List[str] = []
+    summary_lines: list[str] = []
 
-    # 0) Base case: all parameters at 0.0 (inference, training, and finetune)
-    all_zeros = {k: 0.0 for k in include_keys}
-    zero_case_cfg = _build_cfg_with_strengths(base_cfg, all_zeros)
-    zero_case_name = "all-zeros"
-
-    if do_infer:
-        out_dir = os.path.join(infer_root, zero_case_name)
-        acc = _infer_case(zero_case_cfg, weights_path, out_dir)
-        summary_lines.append(f"infer {zero_case_name}: {acc:.3f}%")
-
-    if do_train:
-        out_dir = os.path.join(train_root, zero_case_name)
-        final_test_acc = _train_case(zero_case_cfg, out_dir)
-        summary_lines.append(f"train {zero_case_name}: {final_test_acc:.3f}%")
-
-    if do_finetune:
-        out_dir = os.path.join(output_root, "finetune", zero_case_name)
-        _finetune_case(
-            zero_case_cfg,
-            out_dir,
-            weights_path,
-            additional_epochs=finetune_additional_epochs,
-            finetune_lr=finetune_lr,
-        )
-        summary_lines.append(f"finetune {zero_case_name}: done")
-
-    # 1) Single-parameter at 1.0 (others at 0.0)
-    for key in include_keys:
-        kv = {k: (1.0 if k == key else 0.0) for k in include_keys}
-        case_cfg = _build_cfg_with_strengths(base_cfg, kv)
-        case_name = _format_case_name({key: 1.0})
-
+    def _run_case(case_name: str, case_cfg: AppConfig) -> None:
         if do_infer:
             out_dir = os.path.join(infer_root, case_name)
             acc = _infer_case(case_cfg, weights_path, out_dir)
@@ -222,31 +199,82 @@ def run_one_hot_sweeps(
             )
             summary_lines.append(f"finetune {case_name}: done")
 
-    # 2) All parameters at 1.0
-    all_ones = {k: 1.0 for k in include_keys}
-    case_cfg = _build_cfg_with_strengths(base_cfg, all_ones)
-    case_name = _format_case_name(all_ones)
+    # 0) Base case: all parameters at 0.0 (inference, training, and finetune)
+    if not skip_all_zeros:
+        all_zeros = {k: 0.0 for k in include_keys}
+        zero_case_cfg = _build_cfg_with_strengths(base_cfg, all_zeros)
+        if no_quant_non_all_ones:
+            zero_case_cfg = replace(
+                zero_case_cfg, dac_bits=None, fourier_plane_bits=None, adc_bits=None
+            )
+        _run_case("all-zeros", zero_case_cfg)
 
-    if do_infer:
-        out_dir = os.path.join(infer_root, case_name)
-        acc = _infer_case(case_cfg, weights_path, out_dir)
-        summary_lines.append(f"infer {case_name}: {acc:.3f}%")
-
-    if do_train:
-        out_dir = os.path.join(train_root, case_name)
-        final_test_acc = _train_case(case_cfg, out_dir)
-        summary_lines.append(f"train {case_name}: {final_test_acc:.3f}%")
-
-    if do_finetune:
-        out_dir = os.path.join(output_root, "finetune", case_name)
-        _finetune_case(
-            case_cfg,
-            out_dir,
-            weights_path,
-            additional_epochs=finetune_additional_epochs,
-            finetune_lr=finetune_lr,
+    def _resolve_bits_for_quant_cases() -> tuple[int | None, int | None, int | None]:
+        dac = all_ones_dac_bits if all_ones_dac_bits is not None else base_cfg.dac_bits
+        fp = (
+            all_ones_fourier_plane_bits
+            if all_ones_fourier_plane_bits is not None
+            else base_cfg.fourier_plane_bits
         )
-        summary_lines.append(f"finetune {case_name}: done")
+        adc = all_ones_adc_bits if all_ones_adc_bits is not None else base_cfg.adc_bits
+        return dac, fp, adc
+
+    # 0b) Quantization-only case (distortions off, quant on)
+    if include_quant_onehot:
+        dac_b, fp_b, adc_b = _resolve_bits_for_quant_cases()
+        quant_case_cfg = replace(
+            base_cfg,
+            driver_distortion_strength=0.0,
+            pd_distortion_strength=0.0,
+            tia_distortion_strength=0.0,
+            mrm_power_distortion_strength=0.0,
+            mrm_phase_distortion_strength=0.0,
+            lens_distortion_strength=0.0,
+            dac_bits=dac_b,
+            fourier_plane_bits=fp_b,
+            adc_bits=adc_b,
+        )
+        quant_case_name = f"quant{dac_b}-{fp_b}-{adc_b}"
+
+        _run_case(quant_case_name, quant_case_cfg)
+
+    # 1) Single-parameter at 1.0 (others at 0.0)
+    keys_for_onehot = onehot_keys if onehot_keys is not None else list(include_keys)
+    unknown = sorted(set(keys_for_onehot) - set(include_keys))
+    if unknown:
+        raise ValueError(f"Requested one-hot keys not in include_keys: {unknown}")
+
+    for key in keys_for_onehot:
+        kv = {k: (1.0 if k == key else 0.0) for k in include_keys}
+        case_cfg = _build_cfg_with_strengths(base_cfg, kv)
+        if no_quant_non_all_ones:
+            case_cfg = replace(
+                case_cfg, dac_bits=None, fourier_plane_bits=None, adc_bits=None
+            )
+        case_name = _format_case_name({key: 1.0})
+
+        _run_case(case_name, case_cfg)
+
+    # 2) All parameters at 1.0
+    if not skip_all_ones:
+        all_ones = {k: 1.0 for k in include_keys}
+        case_cfg = _build_cfg_with_strengths(base_cfg, all_ones)
+        # Optionally override quantization only for the all-ones case.
+        # This is useful when the baseline/one-hot cases are run with clamp-only
+        # (no quantization noise), but the full "all" system includes quant at
+        # specific bitwidths (e.g. 4/4/6).
+        all_ones_overrides = {}
+        if all_ones_dac_bits is not None:
+            all_ones_overrides["dac_bits"] = int(all_ones_dac_bits)
+        if all_ones_fourier_plane_bits is not None:
+            all_ones_overrides["fourier_plane_bits"] = int(all_ones_fourier_plane_bits)
+        if all_ones_adc_bits is not None:
+            all_ones_overrides["adc_bits"] = int(all_ones_adc_bits)
+        if all_ones_overrides:
+            case_cfg = replace(case_cfg, **all_ones_overrides)
+        case_name = _format_case_name(all_ones)
+
+        _run_case(case_name, case_cfg)
 
     # Write a brief summary file
     summary_path = os.path.join(output_root, "summary.txt")
@@ -307,11 +335,75 @@ def main() -> None:
         help="Learning rate to use during fine-tuning (overrides config value)",
     )
     parser.add_argument(
-        "--include-pd-tia",
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override batch size for all cases (inference/training/finetune).",
+    )
+    parser.add_argument(
+        "--max-train-batches",
+        type=int,
+        default=None,
+        help="Debug: cap training batches per epoch for all training/finetune cases.",
+    )
+    parser.add_argument(
+        "--max-eval-batches",
+        type=int,
+        default=None,
+        help="Debug: cap eval batches for inference and testing.",
+    )
+    parser.add_argument(
+        "--only-onehot-keys",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated subset of distortion keys to run as one-hot 1.0 cases. "
+            "All-zeros/all-ones cases still use the full include set."
+        ),
+    )
+    parser.add_argument(
+        "--skip-all-zeros",
+        action="store_true",
+        help="Skip the baseline all-zeros case.",
+    )
+    parser.add_argument(
+        "--skip-all-ones",
+        action="store_true",
+        help="Skip the all-ones case.",
+    )
+    parser.add_argument(
+        "--no-quant-non-all-ones",
         action="store_true",
         help=(
-            "Also iterate pd_tia_distortion_strength (not used in current pipeline)."
+            "Force baseline + one-hot cases to run with clamp-only (dac/fourier/adc bits set to None). "
+            "This disables quantization noise while keeping the [0,1] range limiter."
         ),
+    )
+    parser.add_argument(
+        "--include-quantization-onehot",
+        action="store_true",
+        help=(
+            "Add an extra one-hot case where *only* quantization is enabled "
+            "(distortions off, bits inherited from YAML unless --all-ones-*-bits overrides are set)."
+        ),
+    )
+    parser.add_argument(
+        "--all-ones-dac-bits",
+        type=int,
+        default=None,
+        help="Override dac_bits only for the all-ones case (e.g. 4).",
+    )
+    parser.add_argument(
+        "--all-ones-fourier-plane-bits",
+        type=int,
+        default=None,
+        help="Override fourier_plane_bits only for the all-ones case (e.g. 4).",
+    )
+    parser.add_argument(
+        "--all-ones-adc-bits",
+        type=int,
+        default=None,
+        help="Override adc_bits only for the all-ones case (e.g. 6).",
     )
 
     args = parser.parse_args()
@@ -326,8 +418,10 @@ def main() -> None:
         output_root = os.path.join(parent, f"{base_name}_onehots")
 
     include_keys = list(DISTORTION_STRENGTH_KEYS)
-    if args.include_pd_tia:
-        include_keys.append("pd_tia_distortion_strength")
+
+    onehot_keys: list[str] | None = None
+    if args.only_onehot_keys:
+        onehot_keys = [k.strip() for k in args.only_onehot_keys.split(",") if k.strip()]
 
     if not args.do_infer and not args.do_train and not args.do_finetune:
         # Default to all three if none selected
@@ -344,7 +438,18 @@ def main() -> None:
         epochs_override=args.epochs,
         finetune_additional_epochs=args.finetune_additional_epochs,
         finetune_lr=args.finetune_lr,
+        no_quant_non_all_ones=bool(args.no_quant_non_all_ones),
+        include_quant_onehot=bool(args.include_quantization_onehot),
+        all_ones_dac_bits=args.all_ones_dac_bits,
+        all_ones_fourier_plane_bits=args.all_ones_fourier_plane_bits,
+        all_ones_adc_bits=args.all_ones_adc_bits,
         include_keys=include_keys,
+        onehot_keys=onehot_keys,
+        skip_all_zeros=bool(args.skip_all_zeros),
+        skip_all_ones=bool(args.skip_all_ones),
+        batch_size_override=args.batch_size,
+        max_train_batches=args.max_train_batches,
+        max_eval_batches=args.max_eval_batches,
     )
 
 

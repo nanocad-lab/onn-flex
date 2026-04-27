@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import csv
+import itertools
+import json
 import os
 import yaml
 from dataclasses import fields as dataclass_fields
-from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -15,9 +17,9 @@ import torchvision.transforms as transforms
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-from onn_layers import FTconvlayer
-from onn_config import AppConfig
 from diagnostics.pretrain_tests import run_pretrain_tests
+from onn_config import AppConfig
+from onn_layers import FTconvlayer
 
 DISTORTION_STRENGTH_FIELDS = [
     f.name
@@ -33,37 +35,49 @@ DISTORTION_STRENGTH_FIELDS = [
 
 def get_data_loaders(
     batch_size: int,
-) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-    """Create CIFAR-10 train / test dataloaders with the same augmentation
-    pipeline used in the original template."""
-    # stats = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+) -> tuple[
+    torch.utils.data.DataLoader,
+    torch.utils.data.DataLoader,
+    torch.utils.data.DataLoader,
+]:
+    """Create CIFAR-10 train, train-eval, and test dataloaders."""
 
     train_transform = transforms.Compose(
         [
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
             transforms.ToTensor(),
-            # transforms.Normalize(*stats, inplace=True),
         ]
     )
     test_transform = transforms.Compose(
         [
             transforms.ToTensor(),
-            # transforms.Normalize(*stats),
         ]
     )
 
-    trainset = torchvision.datasets.CIFAR10(
+    full_trainset_aug = torchvision.datasets.CIFAR10(
         root="./data", train=True, download=True, transform=train_transform
+    )
+    full_trainset_plain = torchvision.datasets.CIFAR10(
+        root="./data", train=True, download=True, transform=test_transform
     )
     testset = torchvision.datasets.CIFAR10(
         root="./data", train=False, download=True, transform=test_transform
     )
 
     trainloader = torch.utils.data.DataLoader(
-        trainset,
+        full_trainset_aug,
         batch_size=batch_size,
         shuffle=True,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
+    )
+    train_eval_loader = torch.utils.data.DataLoader(
+        full_trainset_plain,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=8,
         pin_memory=True,
         persistent_workers=True,
@@ -78,7 +92,7 @@ def get_data_loaders(
         persistent_workers=True,
         prefetch_factor=2,
     )
-    return trainloader, testloader
+    return trainloader, train_eval_loader, testloader
 
 
 # -------------------------------
@@ -86,14 +100,33 @@ def get_data_loaders(
 # -------------------------------
 
 
+def _norm_divisor(x: torch.Tensor, mode: str) -> torch.Tensor:
+    """Return a scalar divisor for max-norm style normalization."""
+    if mode == "max":
+        return x.max()
+    if mode == "second_largest":
+        flat = x.reshape(-1)
+        if flat.numel() < 2:
+            return flat.max()
+        top2 = torch.topk(flat, k=2).values
+        denom = top2[1]
+        # If the second-largest is zero (e.g. a single nonzero outlier),
+        # fall back to the maximum to avoid division by ~0.
+        if denom.item() <= 0:
+            denom = top2[0]
+        return denom
+    raise ValueError(f"Unknown max_norm_mode: {mode}")
+
+
 class FFTConvNet(nn.Module):
-    """Configurable variant of the 7-layer FFTConv network from `old_template.py`.
+    """Configurable 7-layer FFTConv network.
 
     The number of identical intermediate blocks (originally 5) can be varied
     through `config.num_identical_layers`."""
 
     def __init__(self, config: AppConfig):
         super().__init__()
+        self.max_norm_mode = str(getattr(config, "max_norm_mode", "max") or "max")
 
         # Stem
         self.conv1 = FTconvlayer(
@@ -119,8 +152,13 @@ class FFTConvNet(nn.Module):
 
         # Configurable sequence of identical blocks
         class _MaxNorm(nn.Module):
+            def __init__(self, mode: str):
+                super().__init__()
+                self.mode = mode
+
             def forward(self, x: torch.Tensor):
-                return x / x.max().clamp_min(1e-12)
+                denom = _norm_divisor(x, self.mode).clamp_min(1e-12)
+                return x / denom
 
         blocks = []
         for _ in range(config.num_identical_layers):
@@ -135,11 +173,10 @@ class FFTConvNet(nn.Module):
                 nn.ReLU(inplace=True),
             ]
             if getattr(config, "normalize_blocks", False):
-                seq.append(_MaxNorm())
+                seq.append(_MaxNorm(self.max_norm_mode))
             blocks.append(nn.Sequential(*seq))
         self.blocks = nn.Sequential(*blocks)
 
-        # Classifier (identical to original template)
         self.classifier = nn.Sequential(
             nn.MaxPool2d(2),
             nn.Flatten(),
@@ -147,17 +184,16 @@ class FFTConvNet(nn.Module):
             nn.Linear(256, 10),
         )
 
-    # pylint: disable=arguments-differ
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
         x = self.maxpool1(x)
         x = F.relu(x)
-        x = x / x.max().clamp_min(1e-12)
+        x = x / _norm_divisor(x, self.max_norm_mode).clamp_min(1e-12)
 
         x = self.conv2(x)
         x = self.maxpool2(x)
         x = F.relu(x)
-        x = x / x.max().clamp_min(1e-12)
+        x = x / _norm_divisor(x, self.max_norm_mode).clamp_min(1e-12)
 
         x = self.blocks(x)
         x = self.classifier(x)
@@ -170,24 +206,49 @@ class FFTConvNet(nn.Module):
 
 
 def evaluate(
-    model: nn.Module, dataloader: torch.utils.data.DataLoader, device: torch.device
+    model: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    max_batches: int | None = None,
 ) -> float:
+    _, acc = evaluate_metrics(
+        model, dataloader, device, criterion=None, max_batches=max_batches
+    )
+    print(f"Accuracy: {acc:.3f}%")
+    return acc
+
+
+def evaluate_metrics(
+    model: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    criterion: nn.Module | None,
+    max_batches: int | None = None,
+) -> tuple[float | None, float]:
+    """Compute (avg_loss, accuracy). If criterion is None, avg_loss is None."""
     model.eval()
     correct = 0
     total = 0
+    total_loss = 0.0
     with torch.no_grad():
-        for images, labels in dataloader:
+        for batch_idx, (images, labels) in enumerate(dataloader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
             images, labels = (
                 images.to(device, non_blocking=True),
                 labels.to(device, non_blocking=True),
             )
             outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
+            if criterion is not None:
+                loss = criterion(outputs, labels)
+                total_loss += float(loss.item()) * labels.size(0)
+            predicted = outputs.argmax(dim=1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    acc = 100 * correct / total
-    print(f"Accuracy: {acc:.3f}%")
-    return acc
+    acc = 100.0 * correct / max(total, 1)
+    if criterion is None:
+        return None, acc
+    return total_loss / max(total, 1), acc
 
 
 def run_full_strength_inference(
@@ -210,7 +271,9 @@ def run_full_strength_inference(
         print(
             "[INFO] Running inference with all distortion strength parameters set to 1.0"
         )
-        acc = evaluate(ref_model, dataloader, device)
+        acc = evaluate(
+            ref_model, dataloader, device, max_batches=getattr(config, "max_eval_batches", None)
+        )
     finally:
         if device.type == "cuda":
             ref_model.to("cpu")
@@ -261,8 +324,13 @@ def train_onn_model(config: AppConfig) -> float:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    max_train_batches = getattr(config, "max_train_batches", None)
+    max_eval_batches = getattr(config, "max_eval_batches", None)
+
     # Build dataset loaders
-    trainloader, testloader = get_data_loaders(config.batch_size)
+    trainloader, train_eval_loader, testloader = get_data_loaders(config.batch_size)
 
     # Build model
     model = FFTConvNet(config).to(device)
@@ -289,23 +357,62 @@ def train_onn_model(config: AppConfig) -> float:
             raise ValueError("--eval-only set but --pretrained-weights not provided")
         ckpt = torch.load(config.pretrained_weights, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
-        test_acc = evaluate(model, testloader, device)
+        test_acc = evaluate(model, testloader, device, max_batches=max_eval_batches)
         print(f"Test accuracy: {test_acc:.2f}%")
         return test_acc
 
     # ---------------- Training path -----------------------
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(int(config.num_epochs), 1)
+    )
 
-    best_acc = 0.0
-    scaler = GradScaler() if device.type == "cuda" else None
+    # Per-epoch metrics (written as independent CSVs per split)
+    train_metrics_path = os.path.join(config.output_dir, "train_metrics.csv")
+    test_metrics_path = os.path.join(config.output_dir, "test_metrics.csv")
 
-    last_epoch_test_acc = 0.0
+    def _init_csv(path: str, fieldnames: list[str]) -> None:
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+
+    def _append_csv(path: str, row: dict[str, object], fieldnames: list[str]) -> None:
+        with open(path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writerow(row)
+
+    metrics_fields = ["epoch", "loss", "accuracy", "lr"]
+    _init_csv(train_metrics_path, metrics_fields)
+    _init_csv(test_metrics_path, metrics_fields)
+
+    best_test_acc = -1.0
+    best_test_epoch = -1
+    best_test_snapshot: dict[str, object] = {}
+    scaler = GradScaler("cuda") if device.type == "cuda" else None
+
+    train_loss: float | None = None
+    train_eval_loss: float | None = None
+    train_acc: float | None = None
+
+    last_epoch_test_acc = float("nan")
     for epoch in range(config.num_epochs):
         model.train()
         running_loss = 0.0
-        pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{config.num_epochs - 1}")
+        num_train_batches = 0
+
+        if max_train_batches is not None:
+            total_batches = min(int(max_train_batches), len(trainloader))
+            train_iter = itertools.islice(trainloader, int(max_train_batches))
+        else:
+            total_batches = len(trainloader)
+            train_iter = trainloader
+
+        pbar = tqdm(
+            train_iter,
+            total=total_batches,
+            desc=f"Epoch {epoch}/{config.num_epochs - 1}",
+        )
         for inputs, labels in pbar:
             inputs, labels = (
                 inputs.to(device, non_blocking=True),
@@ -327,22 +434,68 @@ def train_onn_model(config: AppConfig) -> float:
                 optimizer.zero_grad()
 
             running_loss += loss.item()
+            num_train_batches += 1
             pbar.set_postfix({"loss": f"{loss.item():.3f}"})
 
         scheduler.step()
 
         # Evaluate
-        test_acc = evaluate(model, testloader, device)
-        last_epoch_test_acc = test_acc
-        train_acc = evaluate(model, trainloader, device)
-        best_acc = max(best_acc, test_acc)
+        lr = float(optimizer.param_groups[0]["lr"])
+        train_loss = float(running_loss / max(num_train_batches, 1))
+
+        train_eval_loss, train_acc = evaluate_metrics(
+            model,
+            train_eval_loader,
+            device,
+            criterion,
+            max_batches=max_eval_batches,
+        )
+        test_loss, test_acc = evaluate_metrics(
+            model, testloader, device, criterion, max_batches=max_eval_batches
+        )
+        last_epoch_test_acc = float(test_acc)
+
+        _append_csv(
+            train_metrics_path,
+            {
+                "epoch": epoch,
+                "loss": f"{train_loss:.6f}",
+                "accuracy": f"{train_acc:.6f}",
+                "lr": f"{lr:.8f}",
+            },
+            metrics_fields,
+        )
+        _append_csv(
+            test_metrics_path,
+            {
+                "epoch": epoch,
+                "loss": f"{float(test_loss):.6f}" if test_loss is not None else "",
+                "accuracy": f"{test_acc:.6f}",
+                "lr": f"{lr:.8f}",
+            },
+            metrics_fields,
+        )
+
+        if test_acc > best_test_acc:
+            best_test_acc = float(test_acc)
+            best_test_epoch = int(epoch)
+            best_test_snapshot = {
+                "epoch": epoch,
+                "train_acc": float(train_acc),
+                "train_eval_loss": float(train_eval_loss)
+                if train_eval_loss is not None
+                else None,
+                "train_loss": float(train_loss),
+                "test_acc": float(test_acc),
+                "test_loss": float(test_loss) if test_loss is not None else None,
+            }
+
         print(
             {
                 "epoch": epoch,
-                "train_acc": f"{train_acc:.2f}",
                 "test_acc": f"{test_acc:.2f}",
-                "best_acc": f"{best_acc:.2f}",
-                "loss": f"{running_loss / len(trainloader):.3f}",
+                "best_test_acc": f"{best_test_acc:.2f}",
+                "loss": f"{train_loss:.3f}",
             }
         )
 
@@ -355,7 +508,7 @@ def train_onn_model(config: AppConfig) -> float:
 
     # ---------------- Export -------------------------------
     ckpt_path = os.path.join(config.output_dir, "fftconv_checkpoint.pth")
-    save_checkpoint(model, config, best_acc, ckpt_path)
+    save_checkpoint(model, config, best_test_acc, ckpt_path)
     # Save full model for structure reference (note: bigger file)
     torch.save(model, os.path.join(config.output_dir, "fftconv_full_model.pth"))
 
@@ -363,7 +516,22 @@ def train_onn_model(config: AppConfig) -> float:
     with open(os.path.join(config.output_dir, "final_config.yaml"), "w") as f:
         yaml.dump(vars(config), f)
 
+    summary = {
+        "best_test": best_test_snapshot,
+        "final": {
+            "epoch": (config.num_epochs - 1) if config.num_epochs > 0 else -1,
+            "train_acc": float(train_acc) if train_acc is not None else None,
+            "train_eval_loss": float(train_eval_loss)
+            if train_eval_loss is not None
+            else None,
+            "train_loss": float(train_loss) if train_loss is not None else None,
+            "test_acc": float(last_epoch_test_acc) if config.num_epochs > 0 else None,
+        },
+    }
+    with open(os.path.join(config.output_dir, "metrics_summary.json"), "w") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+
     print(
-        f"Training finished. Last epoch test accuracy: {last_epoch_test_acc:.2f}% | Best test accuracy: {best_acc:.2f}%. Checkpoint saved to {ckpt_path}."
+        f"Training finished. Last epoch test accuracy: {last_epoch_test_acc:.2f}% | Best test accuracy: {best_test_acc:.2f}% (epoch {best_test_epoch}). Checkpoint saved to {ckpt_path}."
     )
     return last_epoch_test_acc

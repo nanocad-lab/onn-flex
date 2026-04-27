@@ -137,72 +137,6 @@ def _range_check_jtc(config: AppConfig, output_dir: str) -> None:
     np.save(os.path.join(output_dir, "jtc_test_output.npy"), out.cpu().numpy())
 
 
-def _plot_array(arr: torch.Tensor, title: str, save_path: str) -> None:
-    plt.figure(figsize=(6, 4))
-    arr_np = arr.detach().cpu().numpy()
-    plt.plot(arr_np)
-    if SHOW_TITLES:
-        plt.title(title, fontsize=DEFAULT_TITLE_FONTSIZE)
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-
-
-def _stage_plots_jtc(config: AppConfig, output_dir: str) -> None:
-    """Plot intermediate JTC stages and compare with PyTorch conv."""
-    jtc = JTC(config)
-
-    torch.manual_seed(1)
-    signal = torch.randn(1, 1, 1, config.input_length) / 4
-    kernel = torch.randn(1, config.kernel_length) / 4
-
-    input_plane = jtc.generate_input_plane(signal, kernel)
-    jft = jtc.post_fft(input_plane)
-    jps = jtc.post_output_distortion(jft)
-    print(f"jps: {jps.shape}")
-    print(f"jps: {jps[0, :]}")
-    out = jtc.inverse_output(jps)
-    print(f"out: {out.shape}")
-    print(f"out: {out[0, :]}")
-
-    # --- Combine stage plots into a single multi-panel PDF ---
-    conv_out = torch.nn.functional.conv1d(
-        signal.view(1, 1, -1), kernel.view(1, 1, -1), padding="same"
-    )[0, :]
-
-    print(f"conv_out: {conv_out.shape}")
-    print(f"conv_out: {conv_out[0, :]}")
-    # input("Press Enter to continue...")
-
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
-
-    # Top-left: Input plane magnitude
-    axes[0, 0].plot(torch.abs(input_plane[0, :]).detach().cpu().numpy())
-    if SHOW_TITLES:
-        axes[0, 0].set_title("Input plane", fontsize=DEFAULT_TITLE_FONTSIZE)
-
-    # Top-right: After FFT magnitude
-    axes[0, 1].plot(torch.abs(jft[0, :]).detach().cpu().numpy())
-    if SHOW_TITLES:
-        axes[0, 1].set_title("Post FFT", fontsize=DEFAULT_TITLE_FONTSIZE)
-
-    # Bottom-left: After output distortion
-    axes[1, 0].plot(jps[0, :].detach().cpu().numpy())
-    if SHOW_TITLES:
-        axes[1, 0].set_title("Post output distortion", fontsize=DEFAULT_TITLE_FONTSIZE)
-
-    # Bottom-right: Final output vs. PyTorch conv reference
-    axes[1, 1].plot(out[0, :].detach().cpu().numpy(), label="jtc")
-    axes[1, 1].plot(conv_out[0, :].detach().cpu().numpy(), label="torch_conv")
-    if SHOW_TITLES:
-        axes[1, 1].set_title("Final output comparison", fontsize=DEFAULT_TITLE_FONTSIZE)
-    axes[1, 1].legend()
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "stage_plots.pdf"))
-    plt.close(fig)
-
-
 def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
     """Compute and plot detailed JTC pipeline stages into a single multi-panel PDF.
 
@@ -215,8 +149,8 @@ def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
     jtc = JTC(config)
 
     torch.manual_seed(2)
-    signal = torch.randn(1, config.jtc_half_size) / 4
-    kernel = torch.randn(1, config.jtc_half_size) / 4
+    signal = torch.randn(1, config.input_length) / 4
+    kernel = torch.randn(1, config.kernel_length) / 4
 
     with torch.no_grad():
         stage_data = jtc.compute_stage_tensors(signal, kernel)
@@ -275,21 +209,6 @@ def run_pretrain_tests(config: AppConfig) -> None:
             config.driver_distortion_data_path, deg, config.output_dir, "driver"
         )
 
-    # PD/TIA (use 2nd-order reference instead of linear)
-    if config.pd_tia_distortion_data_path and os.path.exists(
-        config.pd_tia_distortion_data_path
-    ):
-        deg = config.pd_tia_distortion_polyfit_order or get_ideal_degree(
-            config.pd_tia_distortion_data_path
-        )
-        _sweep_and_plot(
-            config.pd_tia_distortion_data_path,
-            deg,
-            config.output_dir,
-            "pd_tia",
-            ref_degree=2,
-        )
-
     # PD
     if config.pd_distortion_data_path and os.path.exists(
         config.pd_distortion_data_path
@@ -323,13 +242,6 @@ def run_pretrain_tests(config: AppConfig) -> None:
             config.mrm_phase_data_path
         )
         _sweep_and_plot(config.mrm_phase_data_path, deg, config.output_dir, "mrm_phase")
-
-    # Quick JTC sanity check and stage plots
-    try:
-        # TODO: Fix stage plots to work with batched JTC
-        _stage_plots_jtc(config, config.output_dir)
-    except Exception as e:
-        print(f"[ERROR] JTC stage plots failed: {e}")
 
     try:
         _range_check_jtc(config, config.output_dir)

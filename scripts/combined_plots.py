@@ -1,17 +1,16 @@
+import argparse
 import os
 import sys
 from pathlib import Path
-import argparse
-from typing import Optional, Tuple
-from matplotlib.axes import Axes
 
 # Ensure repository root is on sys.path when run directly
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 
 from plot_style import (
     apply_global_plot_style,
@@ -21,9 +20,9 @@ from plot_style import (
     SHOW_TITLES,
 )
 from onn_config import AppConfig
-from onn_component import get_ideal_degree, get_coeffs
+from onn_component import get_coeffs, get_ideal_degree
 from onn_inference import load_config_from_yaml
-from scripts.distortion_sweep import REF_DIGITAL_ACC, ACC_YLIM, SNDR_YLIM
+from scripts.distortion_sweep import ACC_YLIM, SNDR_YLIM
 
 # Apply shared Matplotlib style (labels/ticks/titles)
 apply_global_plot_style()
@@ -31,7 +30,7 @@ apply_global_plot_style()
 
 def _load_sweep_results(
     sweep_dir: str, param: str
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Load a parameter sweep results file saved by distortion_sweep.
 
     Returns tuple: (strengths, accs, sndrs, jps_sndrs)
@@ -48,10 +47,11 @@ def _load_sweep_results(
     strengths = results[:, 0]
     accs = results[:, 1]
     sndrs = results[:, 2]
-    if results.shape[1] >= 5:
-        jps_sndrs = results[:, 4]
-    else:
-        jps_sndrs = sndrs
+    if results.shape[1] < 5:
+        raise ValueError(
+            f"{data_file} must contain columns: strength accuracy sndr enob jps_sndr"
+        )
+    jps_sndrs = results[:, 4]
     return strengths, accs, sndrs, jps_sndrs
 
 
@@ -72,16 +72,6 @@ def _plot_sweep_on_axes(
     acc_line = ax1.plot(
         strengths, accs, "bo-", label="Inference Accuracy", markersize=ms, linewidth=lw
     )[0]
-    # Reference digital accuracy (from distortion_sweep)
-    ref_acc = REF_DIGITAL_ACC
-    ref_line = ax1.axhline(
-        y=ref_acc,
-        color="k",
-        linestyle="--",
-        alpha=0.7,
-        label=f"Digital Reference ({ref_acc:.1f}%)",
-        linewidth=lw,
-    )
     if param == "ler_std_dev":
         ax1.set_xlabel("Splitter Ratio Std. Dev.", fontsize=label_fs)
     else:
@@ -103,9 +93,8 @@ def _plot_sweep_on_axes(
 
     # Legend: top-right in specific order
     legend_fs = 8 if compact else DEFAULT_TICK_LABEL_FONTSIZE
-    ordered_handles = [ref_line, acc_line, sndr_line, jps_line]
+    ordered_handles = [acc_line, sndr_line, jps_line]
     ordered_labels = [
-        f"Digital Reference ({ref_acc:.1f}%)",
         "Inference Accuracy",
         "SNDR (pJTC output)",
         "SNDR (JPS)",
@@ -130,7 +119,7 @@ def _plot_sweep_on_axes(
 def _plot_fit_on_axes(
     ax: Axes,
     csv_path: str,
-    poly_order: Optional[int],
+    poly_order: int | None,
     tag: str,
     ref_degree: int = 1,
     compact: bool = False,
@@ -202,7 +191,7 @@ def _plot_fit_on_axes(
 def generate_combined_component_plots(
     config: AppConfig,
     sweep_output_dir: str,
-    output_dir: Optional[str] = None,
+    output_dir: str | None = None,
     include_ler: bool = False,
     ieee_compact: bool = True,
 ) -> None:

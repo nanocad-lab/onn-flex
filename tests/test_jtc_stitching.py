@@ -22,7 +22,7 @@ class TestContaminationProfile:
         # Config with good separation
         M, N, plane, sep = 16, 8, 64, 15
 
-        total, clean, stride = compute_contamination_profile(M, N, plane, sep)
+        total, _, _ = compute_contamination_profile(M, N, plane, sep)
 
         # Should get full correlation length
         assert total == M + N - 1  # 23
@@ -262,23 +262,18 @@ class TestStitchingEdgeCases:
         print(f"  Stride: {stride}")
         print(f"  Passes per row: {passes}")
 
-    def test_backward_compatibility_with_usable_outputs(self):
-        """Verify backward compatibility with old usable_outputs function."""
+    def test_usable_outputs_matches_total_correlation_length(self):
+        """Verify usable_outputs returns the total correlation length."""
         M, N, plane, sep = 16, 8, 48, 9
 
-        # Old function
-        old_usable = usable_outputs(M, N, plane, sep)
-
-        # New function
+        total_usable = usable_outputs(M, N, plane, sep)
         total, clean, stride = compute_contamination_profile(M, N, plane, sep)
 
-        # old_usable should equal total (M+N-1)
-        assert old_usable == total == M + N - 1
+        assert total_usable == total == M + N - 1
 
-        print(f"\nBackward compatibility: M={M}, N={N}")
-        print(f"  Old usable_outputs: {old_usable}")
-        print(f"  New total_outputs: {total}")
-        print(f"  ✓ Match (backward compatible)")
+        print(f"\nUsable outputs: M={M}, N={N}")
+        print(f"  usable_outputs: {total_usable}")
+        print(f"  total_outputs: {total}")
 
 
 if __name__ == "__main__":

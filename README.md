@@ -10,7 +10,7 @@ python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/run
 
 ## Training with PyTorch Conv (Alternative to JTC)
 ```bash
-python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_pytorch/ --use-pytorch-conv --batch-size 128
+python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_pytorch/ --conv-backend pytorch --batch-size 128
 ```
 
 ## Training with Fourier Conv (FFT-based alternative to JTC)
@@ -18,7 +18,7 @@ python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/run
 python onn_main.py \
   --config-file configs/config_ideal.yaml \
   --output-dir runs/runs_fft/ \
-  --use-fourier-conv \
+  --conv-backend fourier \
   --batch-size 128
 ```
 
@@ -27,8 +27,7 @@ python onn_main.py \
 python onn_main.py \
   --config-file configs/config_ideal.yaml \
   --output-dir runs/runs_fft_q/ \
-  --use-fourier-conv \
-  --quantize-fourier-plane \
+  --conv-backend fourier \
   --fourier-plane-bits 6 \
   --batch-size 128
 ```
@@ -38,18 +37,23 @@ python onn_main.py \
 python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/pretrain_only/ --pretrain-tests-only
 ```
 
+## Quantlevel sweep (ste_maxscale, 8 GPUs)
+```bash
+python scripts/sweep_quantlevel_ste_maxscale.py --gpus 0,1,2,3,4,5,6,7
+```
+
 # Distortion Sweep Analysis
 
 The distortion sweep script analyzes the impact of various hardware distortions on model performance, generating both accuracy and SNDR (Signal-to-Noise and Distortion Ratio) plots.
 
 ## Full Distortion Sweep (Run inference and generate plots)
 ```bash
-python distortion_sweep.py --config runs/runs_ideal/final_config.yaml --weights runs/runs_ideal/fftconv_checkpoint.pth --output-dir sweep_results/
+python scripts/distortion_sweep.py --config runs/runs_ideal/final_config.yaml --weights runs/runs_ideal/fftconv_checkpoint.pth --output-dir sweep_results/
 ```
 
 ## Plot-Only Mode (Generate plots from existing data)
 ```bash
-python distortion_sweep.py --plot-only --output-dir sweep_results/
+python scripts/distortion_sweep.py --plot-only --output-dir sweep_results/
 ```
 
 ## Features
@@ -57,16 +61,15 @@ python distortion_sweep.py --plot-only --output-dir sweep_results/
 ### Generated Outputs
 - **1D Parameter Sweeps**: Plots showing accuracy and SNDR vs. distortion strength for:
   - Driver distortion
-  - PD-TIA distortion
+  - PD distortion
+  - TIA distortion
   - MRM power distortion
   - MRM phase distortion
 - **2D JTC Geometry Sweep**: Heatmaps showing accuracy and SNDR vs. JTC separation and total field size
-- **Digital Reference Line**: All accuracy plots include a reference line at 60.13% showing ideal digital performance
 
 ### Plot-Only Mode Benefits
 - **Fast plot regeneration**: Create updated plots without expensive re-inference
-- **Styling updates**: Apply new plot features (reference lines, SNDR terminology) to existing data
-- **Backward compatibility**: Works with data from previous runs
+- **Styling updates**: Apply plot terminology and formatting changes to existing data
 - **Selective plotting**: Generate only the plots you need
 
 ### Data Files Generated
@@ -80,10 +83,10 @@ python distortion_sweep.py --plot-only --output-dir sweep_results/
 ### Example Workflow
 ```bash
 # 1. Run full sweep (takes time)
-python distortion_sweep.py --config config.yaml --weights model.pth --output-dir results/
+python scripts/distortion_sweep.py --config config.yaml --weights model.pth --output-dir results/
 
 # 2. Later, regenerate plots with updated styling (fast)
-python distortion_sweep.py --plot-only --output-dir results/
+python scripts/distortion_sweep.py --plot-only --output-dir results/
 ```
 
 # One‑Hot Distortion Runs
@@ -117,12 +120,6 @@ Runs all the above inference and training baselines and sweeps.
 Fine‑tune the all‑zeros baseline, each one‑hot case, and the all‑ones case initialized from the base run checkpoint. The additional epochs apply equally to keep baseline epoch parity:
 ```bash
 python scripts/one_hot_distortion_runs.py --base-run runs/runs_ideal_0825 --do-finetune --finetune-additional-epochs 5 --finetune-lr 5e-4
-```
-
-## Optional: include PD‑TIA strength
-By default, the sweep covers `driver`, `pd`, `tia`, `mrm_power`, and `mrm_phase`. To also include `pd_tia_distortion_strength`:
-```bash
-python scripts/one_hot_distortion_runs.py --base-run runs/runs_ideal_0825 --do-infer --include-pd-tia
 ```
 
 ## Outputs

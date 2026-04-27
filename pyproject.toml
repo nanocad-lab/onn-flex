@@ -10,8 +10,3 @@ strict = true
 warn_unused_ignores = true
 ignore_missing_imports = true
 show_error_codes = true
-
-[[tool.mypy.overrides]]
-# Legacy template not maintained for typing
-module = ["old_template"]
-ignore_errors = true

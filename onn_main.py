@@ -1,12 +1,12 @@
 import argparse
 import os
 import yaml
-from typing import Optional, Any, Dict
+from dataclasses import replace
 from onn_train import train_onn_model
-from onn_config import AppConfig
+from onn_config import AppConfig, load_app_config_from_yaml
 
 
-def parse_initial_args() -> tuple[Optional[str], Optional[str]]:
+def parse_initial_args() -> tuple[str | None, str | None]:
     """Parse just the config file and output directory from command line."""
     parser = argparse.ArgumentParser(
         description="Parse config location and output directory"
@@ -18,26 +18,14 @@ def parse_initial_args() -> tuple[Optional[str], Optional[str]]:
         "-o", "--output-dir", type=str, help="Output directory for saving config"
     )
 
-    args, _ = (
-        parser.parse_known_args()
-    )  # Use known_args to ignore other arguments for now
+    args, _ = parser.parse_known_args()
     return args.config_file, args.output_dir
 
 
 def load_yaml_config(config_path: str) -> AppConfig:
     """Load application config from YAML file."""
     try:
-        with open(config_path, "r") as f:
-            yaml_data: Dict[str, Any] = yaml.safe_load(f)
-
-        # Filter out keys that don't exist in AppConfig
-        valid_config: Dict[str, Any] = {
-            k: v
-            for k, v in yaml_data.items()
-            if k in [field.name for field in AppConfig.__dataclass_fields__.values()]
-        }
-
-        return AppConfig(**valid_config)
+        return load_app_config_from_yaml(config_path)
     except FileNotFoundError:
         print(f"Config file {config_path} not found. Using defaults.")
         return AppConfig()
@@ -55,6 +43,15 @@ def _str2bool(v: str) -> bool:
     if val in {"no", "false", "f", "0", "n"}:
         return False
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {v}")
+
+
+def _optional_int(v: str | int | None) -> int | None:
+    if v is None or isinstance(v, int):
+        return v
+    val = v.strip().lower()
+    if val in {"none", "null"}:
+        return None
+    return int(v)
 
 
 def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
@@ -75,26 +72,6 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.output_dir,
         help="Output directory for saving config",
     )
-
-    # # Simulation parameters
-    # parser.add_argument(
-    #     "--num-samples",
-    #     type=int,
-    #     default=yaml_config.num_samples,
-    #     help="Number of samples",
-    # )
-    # parser.add_argument(
-    #     "--num-iterations",
-    #     type=int,
-    #     default=yaml_config.num_iterations,
-    #     help="Number of iterations",
-    # )
-    # parser.add_argument(
-    #     "--random-seed",
-    #     type=int,
-    #     default=yaml_config.random_seed,
-    #     help="Random seed for reproducibility",
-    # )
 
     # JTC parameters
     parser.add_argument(
@@ -127,19 +104,38 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.jtc_total_field,
         help="Total size of the JTC plane (lens size)",
     )
+    parser.add_argument(
+        "--lens-distortion-strength",
+        type=float,
+        default=yaml_config.lens_distortion_strength,
+        help="Lens distortion strength in [0,1] (0=ideal, 1=full lens_coefs).",
+    )
+    parser.add_argument(
+        "--lens-legendre-order",
+        type=int,
+        default=yaml_config.lens_legendre_order,
+        help="Max Legendre order for the lens model (uses orders 1..N).",
+    )
+    parser.add_argument(
+        "--lens-coefs",
+        type=float,
+        nargs="+",
+        default=yaml_config.lens_coefs,
+        help="Lens Legendre coefficients (for orders 1..lens_legendre_order).",
+    )
 
     # Quantization parameters
     parser.add_argument(
         "--dac-bits",
-        type=int,
+        type=_optional_int,
         default=yaml_config.dac_bits,
-        help="DAC bits for quantization",
+        help="DAC bits for quantization; use 'none' to keep clamp-only with no quantization noise",
     )
     parser.add_argument(
         "--adc-bits",
-        type=int,
+        type=_optional_int,
         default=yaml_config.adc_bits,
-        help="ADC bits for quantization",
+        help="ADC bits for quantization; use 'none' to keep clamp-only with no quantization noise",
     )
     parser.add_argument(
         "--scale-output",
@@ -168,32 +164,18 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Polynomial fit order for driver distortion",
     )
 
-    # PD/TIA parameters
-    parser.add_argument(
-        "--pd-tia-distortion-strength",
-        type=float,
-        default=yaml_config.pd_tia_distortion_strength,
-        help="PD/TIA distortion strength",
-    )
-    parser.add_argument(
-        "--pd-tia-distortion-data-path",
-        type=str,
-        default=yaml_config.pd_tia_distortion_data_path,
-        help="Path to PD/TIA distortion data CSV",
-    )
-    parser.add_argument(
-        "--pd-tia-distortion-polyfit-order",
-        type=int,
-        default=yaml_config.pd_tia_distortion_polyfit_order,
-        help="Polynomial fit order for PD/TIA distortion",
-    )
-
     # PD parameters
     parser.add_argument(
         "--pd-distortion-strength",
         type=float,
         default=yaml_config.pd_distortion_strength,
         help="PD distortion strength",
+    )
+    parser.add_argument(
+        "--pd-noise-w",
+        type=float,
+        default=yaml_config.pd_noise_w,
+        help="Additive PD input-referred noise (Watts), sampled per input sample.",
     )
     parser.add_argument(
         "--pd-distortion-data-path",
@@ -247,6 +229,12 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.mrm_power_polyfit_order,
         help="Polynomial fit order for MRM power",
     )
+    parser.add_argument(
+        "--mrm-power-gain",
+        type=float,
+        default=yaml_config.mrm_power_gain,
+        help="Gain applied to the MRM power output in Watts",
+    )
 
     # MRM phase parameters
     parser.add_argument(
@@ -267,6 +255,12 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         default=yaml_config.mrm_phase_polyfit_order,
         help="Polynomial fit order for MRM phase",
     )
+    parser.add_argument(
+        "--laser-rin-db",
+        type=float,
+        default=yaml_config.laser_rin_db,
+        help="Per-shot global laser relative intensity noise (RIN) in dB.",
+    )
 
     # Conv backend selection
     parser.add_argument(
@@ -282,9 +276,9 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
     )
     parser.add_argument(
         "--fourier-plane-bits",
-        type=int,
+        type=_optional_int,
         default=yaml_config.fourier_plane_bits,
-        help="Quantization bits used in the Fourier plane",
+        help="Quantization bits used in the Fourier plane; use 'none' to keep clamp-only",
     )
 
     # Quantizer selection (single)
@@ -345,6 +339,20 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         help="Training batch size",
     )
     parser.add_argument(
+        "--max-train-batches",
+        dest="max_train_batches",
+        type=int,
+        default=yaml_config.max_train_batches,
+        help="Debug: limit number of training batches per epoch",
+    )
+    parser.add_argument(
+        "--max-eval-batches",
+        dest="max_eval_batches",
+        type=int,
+        default=yaml_config.max_eval_batches,
+        help="Debug: limit number of eval/inference batches",
+    )
+    parser.add_argument(
         "--eval-only",
         dest="eval_only",
         action="store_true",
@@ -377,7 +385,7 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
 
     args = parser.parse_args()
 
-    return AppConfig(**vars(args))
+    return replace(yaml_config, **vars(args))
 
 
 def save_config(config: AppConfig, output_dir: str) -> str:

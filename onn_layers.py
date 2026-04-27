@@ -1,106 +1,17 @@
 import math
-from typing import Any, Tuple
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
-from torch.nn.modules import Module
-from torch.nn.parameter import Parameter
+
 from onn_config import AppConfig
 from onn_component import JTC
 
 __all__ = ["FTconvlayer"]
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def _check_8(x: int, name: str):
-    if x != 8:
-        raise ValueError(f"{name} length must be 8 for this implementation. Got {x}.")
-
-
-'''
-class PIC(nn.Module):
-    """In–memory implementation of the joint transform correlator used in the
-    original template. The interface is kept identical so that the training
-    script can be reused without changes."""
-
-    def __init__(self, plane_size: int, sep: int):
-        super().__init__()
-        self.plane_size = plane_size
-        self.sep = sep
-
-    def _perform_jtc_correlation_batch(
-        self, signal_batch: torch.Tensor, kernel_batch: torch.Tensor
-    ) -> torch.Tensor:
-        B = signal_batch.shape[0]
-        M = signal_batch.shape[-1]
-        N = kernel_batch.shape[-1]
-        _check_8(M, "Signal")
-        _check_8(N, "Kernel")
-
-        kernel_complex_batch = kernel_batch.to(torch.complex64)
-        signal_complex_batch = signal_batch.to(torch.complex64)
-
-        plane_size = self.plane_size
-        sep = self.sep
-
-        input_plane_batch = torch.zeros(
-            B, plane_size, dtype=torch.complex64, device=signal_batch.device
-        )
-
-        kernel_start = 0
-        kernel_end = kernel_start + M
-        signal_start = kernel_end + sep
-        signal_end = signal_start + N
-
-        input_plane_batch[:, kernel_start:kernel_end] = kernel_complex_batch
-        input_plane_batch[:, signal_start:signal_end] = signal_complex_batch
-
-        roll_amount = (plane_size // 2) - (M + signal_start) // 2
-        input_plane_batch = torch.roll(input_plane_batch, shifts=roll_amount, dims=-1)
-
-        jft_batch = torch.fft.fft(input_plane_batch, dim=-1)
-        jft_batch = torch.fft.fftshift(jft_batch, dim=-1)
-        jps_batch = torch.abs(jft_batch) ** 2 / plane_size
-
-        output_plane_fft_batch = torch.fft.fft(jps_batch, dim=-1)
-        output_plane_shifted_batch = torch.fft.fftshift(output_plane_fft_batch, dim=-1)
-        output_plane_abs_batch = torch.abs(output_plane_shifted_batch)
-
-        same_indices = (
-            torch.arange(
-                plane_size // 2 + sep + N // 2 + 1,
-                plane_size // 2 + sep + N // 2 + 1 + 8,
-                device=signal_batch.device,
-            )
-            % plane_size
-        )
-        return output_plane_abs_batch[:, same_indices]
-
-    def forward(self, input: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        ins = input.shape
-        wes = weights.shape
-        input_full = input.repeat(1, 1, wes[0], 1)
-        weight_full = weights.repeat(ins[0], ins[1], 1, 1)
-
-        batch_size_for_jtc = (
-            input_full.shape[0] * input_full.shape[1] * input_full.shape[2]
-        )
-        signal_reshaped = input_full.reshape(batch_size_for_jtc, 8)
-        kernel_reshaped = weight_full.reshape(batch_size_for_jtc, 8)
-
-        correlation_output_batched = self._perform_jtc_correlation_batch(
-            signal_reshaped, kernel_reshaped
-        )
-        output_reshaped = correlation_output_batched.reshape(
-            input_full.shape[0], input_full.shape[1], input_full.shape[2], 8
-        )
-        return output_reshaped
-'''
-
-
-class _ConvNd(Module):
+class _ConvNd(nn.Module):
     __constants__ = [
         "stride",
         "padding",
@@ -128,7 +39,7 @@ class _ConvNd(Module):
         groups: int,
         bias: bool,
         padding_mode: str,
-        kernel_length: int = None,  # Added for variable length support
+        kernel_length: int | None = None,
     ):
         super().__init__()
         if in_channels % groups != 0:
@@ -148,12 +59,12 @@ class _ConvNd(Module):
         self.padding_mode = padding_mode
         # Use kernel_length if provided, otherwise fall back to kernel_size
         weight_dim = kernel_length if kernel_length is not None else kernel_size
-        self.weights = Parameter(
+        self.weights = nn.Parameter(
             torch.Tensor(in_channels, out_channels // groups, weight_dim, 2)
         )
         self.cout_per_cin = out_channels // groups
         if bias:
-            self.bias = Parameter(torch.Tensor(out_channels))
+            self.bias = nn.Parameter(torch.Tensor(out_channels))
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
@@ -427,9 +338,6 @@ class FTconvlayer(_ConvNd):
         output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
         output_plane_abs = torch.abs(output_plane_shifted)
 
-        # Extract correlation output
-        # Formula: same_start = plane_size//2 + sep + N//2
-        # Note: Original formula had +1, but empirical analysis shows it should be removed
         same_start = plane_size // 2 + sep + N // 2
 
         # Extract full correlation (M+N-1 outputs) if config allows
@@ -518,7 +426,7 @@ class FTconvlayer(_ConvNd):
         output_n = self.conv_forward(x, weight_n)
         return output_p - output_n
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.hv_concat:
             conv_h = self.pseudo_forward(x, self.weights)
             conv_v = self.pseudo_forward(x.permute(0, 1, 3, 2), self.weights).permute(
@@ -555,7 +463,7 @@ def _uniform_quantize(x, bits: int, s: float = 1.0, signed: bool = False):
 class QAT_IOS(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False
+        ctx, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False
     ) -> torch.Tensor:
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed)
         ctx.save_for_backward(x)
@@ -563,7 +471,7 @@ class QAT_IOS(torch.autograd.Function):
         return q
 
     @staticmethod
-    def backward(ctx: Any, g: torch.Tensor) -> Tuple[torch.Tensor, None, None, None]:
+    def backward(ctx, g: torch.Tensor) -> tuple[torch.Tensor, None, None, None]:
         (x,) = ctx.saved_tensors
         lo, hi = ctx.lo, ctx.hi
         inside = (x >= lo) & (x <= hi)
@@ -576,7 +484,7 @@ class QAT_IOS(torch.autograd.Function):
 class QAT_MAD(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = True
+        ctx, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = True
     ) -> torch.Tensor:
         # MAD is intended for symmetric (signed) weight quantization.
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed=True if signed else False)
@@ -587,7 +495,7 @@ class QAT_MAD(torch.autograd.Function):
         return q
 
     @staticmethod
-    def backward(ctx: Any, g: torch.Tensor) -> Tuple[torch.Tensor, None, None, None]:
+    def backward(ctx, g: torch.Tensor) -> tuple[torch.Tensor, None, None, None]:
         (x,) = ctx.saved_tensors
         s = ctx.s
         lo, hi = ctx.lo, ctx.hi
@@ -611,7 +519,7 @@ class QAT_MAD(torch.autograd.Function):
 class QAT_MPH(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, is_weight: bool = True
+        ctx, x: torch.Tensor, bits: int, s: float = 1.0, is_weight: bool = True
     ) -> torch.Tensor:
         signed = bool(is_weight)  # weights → symmetric; activations → unsigned
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed)
@@ -622,7 +530,7 @@ class QAT_MPH(torch.autograd.Function):
         return q
 
     @staticmethod
-    def backward(ctx: Any, g: torch.Tensor) -> Tuple[torch.Tensor, None, None, None]:
+    def backward(ctx, g: torch.Tensor) -> tuple[torch.Tensor, None, None, None]:
         (x,) = ctx.saved_tensors
         lo, hi, s = ctx.lo, ctx.hi, ctx.s
         if ctx.is_weight:
@@ -640,7 +548,7 @@ class QAT_MPH(torch.autograd.Function):
 class QAT_PWL(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx: Any, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False
+        ctx, x: torch.Tensor, bits: int, s: float = 1.0, signed: bool = False
     ) -> torch.Tensor:
         q, lo, hi, _ = _uniform_quantize(x, bits, s, signed)
         ctx.save_for_backward(x)
@@ -648,7 +556,7 @@ class QAT_PWL(torch.autograd.Function):
         return q
 
     @staticmethod
-    def backward(ctx: Any, g: torch.Tensor) -> Tuple[torch.Tensor, None, None, None]:
+    def backward(ctx, g: torch.Tensor) -> tuple[torch.Tensor, None, None, None]:
         (x,) = ctx.saved_tensors
         lo, hi = ctx.lo, ctx.hi
         mask = ((x >= lo) & (x <= hi)).to(g.dtype)
@@ -671,8 +579,7 @@ class QAT_STE_maxscale(torch.autograd.Function):
         return quantized
 
     @staticmethod
-    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[torch.Tensor, None]:
-        # Return gradients for (input, bits)
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
         return grad_output, None
 
 
@@ -692,6 +599,6 @@ class QAT_STE(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        ctx: Any, grad_output: torch.Tensor
-    ) -> Tuple[torch.Tensor, None, None]:
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None]:
         return grad_output, None, None

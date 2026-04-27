@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import pytest
 from onn_config import AppConfig
 from onn_component import JTC
+from jtc_cycle_planner import usable_outputs
 from onn_layers import FTconvlayer
 
 
@@ -24,10 +25,10 @@ class TestVariableLengths:
     def test_usable_outputs_calculation(self):
         """Test that usable_outputs from jtc_cycle_planner is now correct (M+N-1)."""
         # All return full correlation length M+N-1 when configuration is valid
-        assert JTC._compute_usable_outputs(8, 3, 32, 7) == 10   # 8+3-1 = 10
-        assert JTC._compute_usable_outputs(16, 8, 48, 9) == 23  # 16+8-1 = 23
-        assert JTC._compute_usable_outputs(16, 8, 64, 15) == 23 # 16+8-1 = 23
-        assert JTC._compute_usable_outputs(8, 8, 48, 8) == 15   # 8+8-1 = 15 (golden code case!)
+        assert usable_outputs(8, 3, 32, 7) == 10
+        assert usable_outputs(16, 8, 48, 9) == 23
+        assert usable_outputs(16, 8, 64, 15) == 23
+        assert usable_outputs(8, 8, 48, 8) == 15
 
     def test_jtc_initialization_with_auto_output_length(self):
         """Test that JTC correctly auto-calculates output_length as M+N-1."""

@@ -15,7 +15,6 @@ Exports:
 
 from __future__ import annotations
 
-from typing import Dict, Any
 import seaborn as sns
 
 # Single global knobs for plot styling
@@ -37,15 +36,15 @@ def apply_global_plot_style(
     """Apply a consistent matplotlib style for axis labels, ticks, titles, and legend.
 
     Args:
-        axis_label_fontsize: Optional override for the axis label font size.
+        axis_label_fontsize: Override for the axis label font size.
             If None, uses DEFAULT_AXIS_LABEL_FONTSIZE.
-        tick_label_fontsize: Optional override for tick label font size.
+        tick_label_fontsize: Override for tick label font size.
             If None, uses DEFAULT_TICK_LABEL_FONTSIZE.
-        title_fontsize: Optional override for title font size.
+        title_fontsize: Override for title font size.
             If None, uses DEFAULT_TITLE_FONTSIZE.
-        legend_fontsize: Optional override for legend font size.
+        legend_fontsize: Override for legend font size.
             If None, uses DEFAULT_LEGEND_FONTSIZE.
-        font_family: Optional global font family. Can be a generic family
+        font_family: Global font family. Can be a generic family
             (e.g., "sans-serif", "serif", "monospace") or a specific font
             name available on the system (e.g., "DejaVu Sans", "Times New Roman").
             If None, uses DEFAULT_FONT_FAMILY.
@@ -73,7 +72,7 @@ def apply_global_plot_style(
     )
     family: str = font_family if font_family is not None else DEFAULT_FONT_FAMILY
 
-    rc_updates: Dict[str, Any] = {
+    rc_updates: dict[str, object] = {
         # Global font family
         "font.family": family,
         # Axis labels (set_xlabel / set_ylabel)
