@@ -77,19 +77,19 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
     parser = argparse.ArgumentParser(
-        description="Plot quantlevel_ste_maxscale sweep results in ACM TODAES single-column format."
+        description="Plot quantlevel_ste sweep results in ACM TODAES single-column format."
     )
     parser.add_argument(
         "--csv",
         type=str,
-        default=str(repo_root / "sweep_results" / "quantlevel_ste_maxscale.csv"),
-        help="Path to quantlevel_ste_maxscale.csv.",
+        default=str(repo_root / "sweep_results" / "quantlevel_ste.csv"),
+        help="Path to quantlevel_ste.csv.",
     )
     parser.add_argument(
         "--out",
         type=str,
         default=str(
-            repo_root / "sweep_results" / "quantlevel_ste_maxscale_acm_singlecol.pdf"
+            repo_root / "sweep_results" / "quantlevel_ste_acm_singlecol.pdf"
         ),
         help="Output PDF path.",
     )

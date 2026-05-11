@@ -109,8 +109,6 @@ def _launch_run(
         conv,
         "--batch-size",
         str(batch_size),
-        "--quantizer",
-        "ste_maxscale",
         "--dac-bits",
         str(FIXED_DAC_BITS),
         "--adc-bits",
@@ -154,7 +152,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
     parser = argparse.ArgumentParser(
-        description="Parallel sweep over quantization bit-widths using ste_maxscale."
+        description="Parallel sweep over quantization bit-widths using STE."
     )
     parser.add_argument(
         "--bits",
@@ -183,8 +181,8 @@ def main() -> None:
     parser.add_argument(
         "--conv",
         type=str,
-        choices=["fourier", "pytorch"],
-        default="fourier",
+        choices=["jtc_ideal", "pytorch"],
+        default="jtc_ideal",
         help="Convolution backend to use.",
     )
     parser.add_argument(
@@ -209,12 +207,12 @@ def main() -> None:
         "--output-root",
         type=str,
         default="",
-        help="Where to write per-run outputs (default: runs/quantlevel_ste_maxscale_<timestamp>).",
+        help="Where to write per-run outputs (default: runs/quantlevel_ste_<timestamp>).",
     )
     parser.add_argument(
         "--shared-csv",
         type=str,
-        default=str(repo_root / "sweep_results" / "quantlevel_ste_maxscale.csv"),
+        default=str(repo_root / "sweep_results" / "quantlevel_ste.csv"),
         help="Shared CSV path for best/final metrics across runs.",
     )
     parser.add_argument(
@@ -236,7 +234,7 @@ def main() -> None:
     if args.output_root:
         output_root = Path(args.output_root)
     else:
-        output_root = repo_root / "runs" / f"quantlevel_ste_maxscale_{timestamp}"
+        output_root = repo_root / "runs" / f"quantlevel_ste_{timestamp}"
     output_root.mkdir(parents=True, exist_ok=True)
 
     cfg_path = Path(args.config_file)

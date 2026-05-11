@@ -126,7 +126,7 @@ class FFTConvNet(nn.Module):
 
     def __init__(self, config: AppConfig):
         super().__init__()
-        self.max_norm_mode = str(getattr(config, "max_norm_mode", "max") or "max")
+        self.max_norm_mode = config.max_norm_mode
 
         # Stem
         self.conv1 = FTconvlayer(
@@ -172,7 +172,7 @@ class FFTConvNet(nn.Module):
                 ),
                 nn.ReLU(inplace=True),
             ]
-            if getattr(config, "normalize_blocks", False):
+            if config.normalize_blocks:
                 seq.append(_MaxNorm(self.max_norm_mode))
             blocks.append(nn.Sequential(*seq))
         self.blocks = nn.Sequential(*blocks)
@@ -275,7 +275,7 @@ def run_full_strength_inference(
             ref_model,
             dataloader,
             device,
-            max_batches=getattr(config, "max_eval_batches", None),
+            max_batches=config.max_eval_batches,
         )
     finally:
         if device.type == "cuda":
@@ -329,8 +329,8 @@ def train_onn_model(config: AppConfig) -> float:
 
     os.makedirs(config.output_dir, exist_ok=True)
 
-    max_train_batches = getattr(config, "max_train_batches", None)
-    max_eval_batches = getattr(config, "max_eval_batches", None)
+    max_train_batches = config.max_train_batches
+    max_eval_batches = config.max_eval_batches
 
     # Build dataset loaders
     trainloader, train_eval_loader, testloader = get_data_loaders(config.batch_size)
@@ -340,19 +340,13 @@ def train_onn_model(config: AppConfig) -> float:
 
     # Optionally load pretrained weights for fine-tuning
     if not config.eval_only and config.pretrained_weights:
-        try:
-            ckpt = torch.load(
-                config.pretrained_weights, map_location=device, weights_only=False
-            )
-            state_dict = ckpt.get("model_state_dict", ckpt)
-            model.load_state_dict(state_dict)
-            print(
-                f"[INFO] Loaded pretrained weights for fine-tuning: {config.pretrained_weights}"
-            )
-        except Exception as e:
-            print(
-                f"[WARN] Failed to load pretrained weights '{config.pretrained_weights}': {e}. Proceeding without."
-            )
+        ckpt = torch.load(
+            config.pretrained_weights, map_location=device, weights_only=False
+        )
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(
+            f"[INFO] Loaded pretrained weights for fine-tuning: {config.pretrained_weights}"
+        )
 
     # ---------------- Evaluation-only path ----------------
     if config.eval_only:
@@ -411,12 +405,17 @@ def train_onn_model(config: AppConfig) -> float:
             total_batches = len(trainloader)
             train_iter = trainloader
 
-        pbar = tqdm(
-            train_iter,
-            total=total_batches,
-            desc=f"Epoch {epoch}/{config.num_epochs - 1}",
+        show_progress = bool(config.show_progress)
+        progress_iter = (
+            tqdm(
+                train_iter,
+                total=total_batches,
+                desc=f"Epoch {epoch}/{config.num_epochs - 1}",
+            )
+            if show_progress
+            else train_iter
         )
-        for inputs, labels in pbar:
+        for inputs, labels in progress_iter:
             inputs, labels = (
                 inputs.to(device, non_blocking=True),
                 labels.to(device, non_blocking=True),
@@ -438,7 +437,8 @@ def train_onn_model(config: AppConfig) -> float:
 
             running_loss += loss.item()
             num_train_batches += 1
-            pbar.set_postfix({"loss": f"{loss.item():.3f}"})
+            if show_progress:
+                progress_iter.set_postfix({"loss": f"{loss.item():.3f}"})
 
         scheduler.step()
 

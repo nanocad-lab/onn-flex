@@ -12,18 +12,16 @@ def load_app_config_from_yaml(path: str) -> "AppConfig":
         return AppConfig()
     if not isinstance(raw, dict):
         raise TypeError(f"Expected mapping in config YAML, got {type(raw).__name__}")
-    valid = {k: v for k, v in raw.items() if k in AppConfig.__dataclass_fields__}
-    return AppConfig(**valid)
+    valid_fields = set(AppConfig.__dataclass_fields__)
+    unknown = sorted(str(k) for k in raw if k not in valid_fields)
+    if unknown:
+        raise ValueError(f"Unknown config field(s): {', '.join(unknown)}")
+    return AppConfig(**raw)
 
 
 @dataclass
 class AppConfig:
     """Application configuration class."""
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "AppConfig":
-        """Load an AppConfig from YAML."""
-        return load_app_config_from_yaml(path)
 
     # These control the config loading/saving but aren't part of the actual app config
     config_file: str | None = None
@@ -37,7 +35,6 @@ class AppConfig:
     output_length: int | None = None  # length of output (auto-calculated if None)
     jtc_separation: int = 0  # separation between kernel and signal
     jtc_total_field: int = 16  # total size of the JTC plane (lens size)
-
     # Lens model (optional)
     # Models a unitary lens operator using a 1-D Legendre basis and coefficients.
     # Sweeping `lens_distortion_strength` in [0,1] interpolates between ideal lens
@@ -83,7 +80,8 @@ class AppConfig:
     # Noise terms
     # - laser_rin_db: per-shot global laser relative intensity noise (RIN) in dB.
     #   This is applied as a single scale factor shared across all MRM channels
-    #   in a shot; LER splitter variation then distributes the noisy power unevenly.
+    #   in a shot. It is defined on optical intensity/power; field-amplitude
+    #   paths apply sqrt(scale) before LER splitter variation distributes power.
     # - pd_noise_w: additive PD input-referred noise (Watts), sampled independently
     #   per input sample at each PD evaluation.
     laser_rin_db: float | None = None
@@ -97,17 +95,13 @@ class AppConfig:
     conv_method: str = "patch"  # "patch" or "dot_product" or "tile"
 
     # Convolution backend selection
-    # Options: 'pytorch', 'fourier', 'jtc_emulation'
+    # Options: 'pytorch', 'jtc_ideal', 'jtc_emulation'
     # - 'pytorch': Standard PyTorch conv2d
-    # - 'fourier': FFT-based convolution (software JTC)
+    # - 'jtc_ideal': Ideal JTC optical model without hardware distortions
     # - 'jtc_emulation': Full hardware JTC emulation pipeline
-    conv_backend: str | None = "jtc_emulation"
+    conv_backend: str = "jtc_emulation"
 
     fourier_plane_bits: int | None = 6  # Bits for Fourier plane quantization
-
-    # Quantizer selection (single QAT block for all steps)
-    # Options: 'ste_clipped', 'ste_maxscale', 'ios', 'mad', 'mph', 'pwl'
-    quantizer: str = "ste_clipped"
 
     # ------------------------------------------------------------------
     #  Training / model-related CLI overrides
@@ -126,19 +120,25 @@ class AppConfig:
     max_eval_batches: int | None = None
     # Whether to normalize activations after each identical block
     normalize_blocks: bool = False
+    # Batch independent JTC shots to reduce Python/CUDA launch overhead.
+    enable_jtc_batched_fast_path: bool = True
+    # Use a fused implementation for ideal JTC transfer functions. This is
+    # gated inside JTC so non-ideal transfer curves keep the reference path.
+    enable_jtc_ideal_fused_transfer: bool = False
+    # Show tqdm training progress bars. Disable for quieter logs.
+    show_progress: bool = True
     # Normalization mode for the built-in `x /= max(x)` steps in FFTConvNet.
     # Options: "max", "second_largest" (robust to single outliers).
     max_norm_mode: str = "max"
 
     def __post_init__(self):
         """Validate configuration parameters."""
-        valid_backends = ["pytorch", "fourier", "jtc_emulation"]
-        if self.conv_backend is not None and self.conv_backend not in valid_backends:
+        valid_backends = ["pytorch", "jtc_ideal", "jtc_emulation"]
+        if self.conv_backend not in valid_backends:
             raise ValueError(
                 f"Invalid conv_backend '{self.conv_backend}'. "
                 f"Must be one of {valid_backends}"
             )
-
         # Normalize/validate noise params (allow YAML null -> None)
         if self.laser_rin_db is not None:
             self.laser_rin_db = float(self.laser_rin_db)
@@ -151,13 +151,13 @@ class AppConfig:
         # PD clamp bounds (allow YAML null -> None)
         self.pd_input_clamp_min_w = (
             None
-            if getattr(self, "pd_input_clamp_min_w", 1e-6) is None
-            else float(getattr(self, "pd_input_clamp_min_w"))
+            if self.pd_input_clamp_min_w is None
+            else float(self.pd_input_clamp_min_w)
         )
         self.pd_input_clamp_max_w = (
             None
-            if getattr(self, "pd_input_clamp_max_w", 1e-5) is None
-            else float(getattr(self, "pd_input_clamp_max_w"))
+            if self.pd_input_clamp_max_w is None
+            else float(self.pd_input_clamp_max_w)
         )
         if self.pd_input_clamp_min_w is not None:
             if (
@@ -198,10 +198,10 @@ class AppConfig:
         if self.max_eval_batches is not None and self.max_eval_batches <= 0:
             self.max_eval_batches = None
 
-        self.mrm_power_gain = float(getattr(self, "mrm_power_gain", 1.0) or 1.0)
+        self.mrm_power_gain = float(self.mrm_power_gain or 1.0)
         if not math.isfinite(self.mrm_power_gain) or self.mrm_power_gain <= 0:
             raise ValueError("mrm_power_gain must be finite and > 0")
 
-        self.max_norm_mode = str(getattr(self, "max_norm_mode", "max") or "max")
+        self.max_norm_mode = str(self.max_norm_mode or "max")
         if self.max_norm_mode not in {"max", "second_largest"}:
             raise ValueError("max_norm_mode must be 'max' or 'second_largest'")

@@ -112,15 +112,15 @@ class TestVariableLengths:
         assert output.shape == (batch_size, height, num_kernels, expected_output)
         assert torch.isfinite(output).all()
 
-    def test_fourier_backend_variable_lengths(self):
-        """Test Fourier backend with variable lengths ("same" convolution)."""
+    def test_jtc_ideal_backend_variable_lengths(self):
+        """Test JTC ideal backend with variable lengths ("same" convolution)."""
         config = AppConfig(
             input_length=16,
             kernel_length=8,
             output_length=16,  # "same" convolution: output_length = input_length
             jtc_separation=9,
             jtc_total_field=48,
-            conv_backend="fourier",
+            conv_backend="jtc_ideal",
             dac_bits=None,
             adc_bits=None,
             fourier_plane_bits=None,
@@ -220,7 +220,7 @@ class TestVariableLengths:
             output_length=None,
             jtc_separation=sep,
             jtc_total_field=lens,
-            conv_backend="fourier",
+            conv_backend="jtc_ideal",
             dac_bits=None,  # Disable quantization
             adc_bits=None,
             fourier_plane_bits=None,
@@ -249,9 +249,9 @@ class TestVariableLengths:
         )
 
         with torch.no_grad():
-            layer.weights.data = kernel_jtc.unsqueeze(0).unsqueeze(-1)
+            layer.weight.data = kernel_jtc.unsqueeze(0).unsqueeze(-1)
 
-        result = layer.fourier_conv_forward(signal_jtc, kernel_jtc)
+        result = layer.jtc_ideal_forward(signal_jtc, kernel_jtc)
         result = result.squeeze(1).squeeze(1)  # [batch, output_len]
 
         # Test 1: Correct shape (full correlation M+N-1)
@@ -269,8 +269,8 @@ class TestVariableLengths:
 
         # Test 4: Zero kernel gives mostly autocorrelation of signal
         with torch.no_grad():
-            layer.weights.data[:] = 0.0
-        result_zero_kernel = layer.fourier_conv_forward(
+            layer.weight.data[:] = 0.0
+        result_zero_kernel = layer.jtc_ideal_forward(
             signal_jtc, torch.zeros_like(kernel_jtc)
         )
         result_zero_kernel = result_zero_kernel.squeeze(1).squeeze(1)

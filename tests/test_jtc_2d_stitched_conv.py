@@ -91,11 +91,11 @@ def jtc_2d_stitched_conv(
         # Extract 1D kernel for this row
         kernel_1d = kernel_2d[k_row, :]  # [Kw]
 
-        # Set layer weights [out_ch=1, in_ch=1, 1, kernel_size=Kw]
+        # Set layer weight [out_ch=1, in_ch=1, 1, kernel_size=Kw]
         with torch.no_grad():
-            layer.weights.data = kernel_1d.view(1, 1, 1, Kw)
+            layer.weight.data = kernel_1d.view(1, 1, 1, Kw)
 
-        # Weight for fourier_conv_forward: [Cout=1, W=Kw]
+        # Weight for jtc_ideal_forward: [Cout=1, W=Kw]
         weight_2d = kernel_1d.unsqueeze(0)
 
         # Process each output row
@@ -125,7 +125,7 @@ def jtc_2d_stitched_conv(
                 patch_4d = patch.view(1, 1, 1, M)
 
                 # Run JTC forward pass (clean physics)
-                jtc_output = layer.fourier_conv_forward(patch_4d, weight_2d)
+                jtc_output = layer.jtc_ideal_forward(patch_4d, weight_2d)
                 jtc_output_1d = jtc_output.squeeze()  # [total_outputs]
 
                 # Determine how many outputs to use from this pass
@@ -184,7 +184,7 @@ class TestJTC2DStitchedConv:
             adc_bits=None,
             fourier_plane_bits=None,
             scale_output="none",
-            conv_backend="fourier",
+            conv_backend="jtc_ideal",
         )
 
         # Create small test image and kernel (positive values)
@@ -252,7 +252,7 @@ class TestJTC2DStitchedConv:
             adc_bits=None,
             fourier_plane_bits=None,
             scale_output="none",
-            conv_backend="fourier",
+            conv_backend="jtc_ideal",
         )
 
         # Random inputs

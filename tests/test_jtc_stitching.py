@@ -18,8 +18,8 @@ class TestContaminationProfile:
 
     def test_contamination_profile_basic(self):
         """Test basic contamination profile computation."""
-        # Config with good separation
-        M, N, plane, sep = 16, 8, 64, 15
+        # Config with clean 3-wide row geometry
+        M, N, plane, sep = 16, 3, 64, 13
 
         total, clean, stride = compute_contamination_profile(M, N, plane, sep)
 
@@ -28,8 +28,8 @@ class TestContaminationProfile:
         # clean is the number of clean VALID outputs (M-N+1 = 9)
         num_valid = M - N + 1
         assert clean <= num_valid
-        # Most or all valid outputs should be clean for this config
-        assert clean >= num_valid * 0.8
+        # All valid outputs should be clean for this config
+        assert clean == num_valid
         # Stride should be reasonable
         assert stride > 0
         assert stride <= num_valid
@@ -71,6 +71,16 @@ class TestContaminationProfile:
         assert clean == 0
         assert stride == 0
 
+    def test_mirrored_cross_lobe_overlap_is_contaminated(self):
+        """Large rows can fail even when autocorrelation-only checks pass."""
+        M, N, plane, sep = 86, 3, 256, 83
+
+        total, clean, stride = compute_contamination_profile(M, N, plane, sep)
+
+        assert total == M + N - 1
+        assert clean == 0
+        assert stride == 0
+
     @pytest.mark.parametrize(
         "M,N,plane,sep",
         [
@@ -105,8 +115,8 @@ class TestCyclesForConfig:
 
     def test_cycles_basic(self):
         """Test basic cycle computation."""
-        # Good config with minimal contamination
-        M, N, plane, sep = 16, 3, 48, 10
+        # Good config with clean valid outputs
+        M, N, plane, sep = 16, 3, 64, 13
 
         result = cycles_for_config(M, N, plane, sep)
         assert result is not None
@@ -164,7 +174,7 @@ class TestCyclesForConfig:
     def test_stitching_logic_verification(self):
         """Verify stitching logic for covering 30-pixel row with stride."""
         # Test config
-        M, N, plane, sep = 16, 3, 48, 10
+        M, N, plane, sep = 16, 3, 64, 13
 
         result = cycles_for_config(M, N, plane, sep)
         assert result is not None
@@ -240,7 +250,7 @@ class TestStitchingEdgeCases:
     def test_stride_equals_output_width(self):
         """Test when stride >= output width (single pass case)."""
         # Large M should give large stride
-        M, N, plane, sep = 30, 3, 64, 15
+        M, N, plane, sep = 32, 3, 128, 29
 
         result = cycles_for_config(M, N, plane, sep)
         assert result is not None

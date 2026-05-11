@@ -10,7 +10,7 @@ Examples:
   # SNDR of PD noise / laser RIN at the current config values
   python scripts/check_sndr_snqr.py --config runs/runs_ideal_0825/final_config.yaml --params pd_noise_w,laser_rin_db
 
-  # Quantization SNQR (overall + per-quantizer)
+  # Quantization SNQR (overall + per stage)
   python scripts/check_sndr_snqr.py --config runs/runs_ideal_0825/final_config.yaml --snqr
 """
 
@@ -22,13 +22,13 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from onn_config import load_app_config_from_yaml
 from onn_inference import (
     compute_sqndr_enob,
     compute_sndr_vs_quantized_ideal_enob,
     compute_snqr_enob,
     compute_snr_enob,
     compute_snr_jps,
-    load_config_from_yaml,
 )
 
 
@@ -53,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--snqr",
         action="store_true",
-        help="Also report SNQR for quantization (overall + per-quantizer).",
+        help="Also report SNQR for quantization (overall + per stage).",
     )
     parser.add_argument(
         "--sqndr",
@@ -103,7 +103,7 @@ def _parse_overrides(items: list[str]) -> dict:
 def main() -> None:
     args = _parse_args()
 
-    cfg = load_config_from_yaml(args.config)
+    cfg = load_app_config_from_yaml(args.config)
     overrides = _parse_overrides(list(args.set or []))
     if overrides:
         from dataclasses import replace
@@ -142,10 +142,10 @@ def main() -> None:
         print(f"SNDR(vs quantized ideal): {sndr_q:.2f} dB (ENOB~{enob_q:.2f})")
 
     if args.snqr:
-        # Total quantization effect (disable all quantizers in the reference)
+        # Total quantization effect (disable all quantization stages in the reference)
         snqr_all, enob_all = compute_snqr_enob(
             cfg,
-            quantizers=("dac", "fourier_plane", "adc"),
+            quantization_stages=("dac", "fourier_plane", "adc"),
             num_tests=args.snr_tests,
             seed=args.seed,
         )
@@ -153,7 +153,7 @@ def main() -> None:
 
         for q in ("dac", "fourier_plane", "adc"):
             snqr_q, enob_q = compute_snqr_enob(
-                cfg, quantizers=(q,), num_tests=args.snr_tests, seed=args.seed
+                cfg, quantization_stages=(q,), num_tests=args.snr_tests, seed=args.seed
             )
             print(f"SNQR({q}): {snqr_q:.2f} dB (ENOB~{enob_q:.2f})")
 

@@ -4,7 +4,7 @@ Run a single (mode, case) experiment for the "quantization as a parameter" proto
 This is intentionally single-run so that Slurm can parallelize across cases.
 
 Protocol summary:
-  - baseline + one-hot cases: clamp-only, no quantization noise (dac/fourier/adc bits=None)
+  - baseline + one-hot cases: no quantization noise (dac/fourier/adc bits=None)
   - quant-only case: distortions off, quant enabled (default 4/4/6)
   - all-ones case: all distortions on (alpha=1), quant enabled (default 4/4/6)
 """
