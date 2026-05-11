@@ -28,9 +28,8 @@ if __package__ is None or __package__ == "":
 
 import yaml
 
-from onn_config import AppConfig
-from onn_config import load_app_config_from_yaml
-from onn_inference import load_config_from_yaml, run_inference
+from onn_config import AppConfig, load_app_config_from_yaml
+from onn_inference import run_inference
 from onn_train import train_onn_model
 
 
@@ -45,32 +44,17 @@ DISTORTION_STRENGTH_KEYS: list[str] = [
 
 
 def _read_base_config(base_run_dir: str) -> AppConfig:
-    """Load the base AppConfig from the run directory.
-
-    Prefers `final_config.yaml` (plain YAML). Falls back to `config.yaml`.
-    """
+    """Load the base AppConfig from the run directory."""
     final_cfg = os.path.join(base_run_dir, "final_config.yaml")
-    if os.path.exists(final_cfg):
-        return load_config_from_yaml(final_cfg)
-
-    cfg_path = os.path.join(base_run_dir, "config.yaml")
-    try:
-        return load_app_config_from_yaml(cfg_path)
-    except Exception:
-        pass
-    raise FileNotFoundError(
-        f"Could not load a usable config from {base_run_dir}. Expected final_config.yaml or config.yaml"
-    )
+    if not os.path.exists(final_cfg):
+        raise FileNotFoundError(f"Expected final_config.yaml in {base_run_dir}")
+    return load_app_config_from_yaml(final_cfg)
 
 
 def _save_config(cfg: AppConfig, out_dir: str, filename: str = "config.yaml") -> None:
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, filename), "w") as f:
         yaml.safe_dump(asdict(cfg), f, default_flow_style=False)
-
-
-def _build_cfg_with_strengths(base: AppConfig, kv: dict[str, float]) -> AppConfig:
-    return replace(base, **kv)
 
 
 def _infer_case(cfg: AppConfig, weights: str, out_dir: str) -> float:
@@ -204,7 +188,7 @@ def run_one_hot_sweeps(
     # 0) Base case: all parameters at 0.0 (inference, training, and finetune)
     if not skip_all_zeros:
         all_zeros = {k: 0.0 for k in include_keys}
-        zero_case_cfg = _build_cfg_with_strengths(base_cfg, all_zeros)
+        zero_case_cfg = replace(base_cfg, **all_zeros)
         if no_quant_non_all_ones:
             zero_case_cfg = replace(
                 zero_case_cfg, dac_bits=None, fourier_plane_bits=None, adc_bits=None
@@ -248,7 +232,7 @@ def run_one_hot_sweeps(
 
     for key in keys_for_onehot:
         kv = {k: (1.0 if k == key else 0.0) for k in include_keys}
-        case_cfg = _build_cfg_with_strengths(base_cfg, kv)
+        case_cfg = replace(base_cfg, **kv)
         if no_quant_non_all_ones:
             case_cfg = replace(
                 case_cfg, dac_bits=None, fourier_plane_bits=None, adc_bits=None
@@ -260,10 +244,10 @@ def run_one_hot_sweeps(
     # 2) All parameters at 1.0
     if not skip_all_ones:
         all_ones = {k: 1.0 for k in include_keys}
-        case_cfg = _build_cfg_with_strengths(base_cfg, all_ones)
+        case_cfg = replace(base_cfg, **all_ones)
         # Optionally override quantization only for the all-ones case.
-        # This is useful when the baseline/one-hot cases are run with clamp-only
-        # (no quantization noise), but the full "all" system includes quant at
+        # This is useful when the baseline/one-hot cases disable quantization,
+        # but the full "all" system includes quant at
         # specific bitwidths (e.g. 4/4/6).
         all_ones_overrides = {}
         if all_ones_dac_bits is not None:
@@ -377,8 +361,8 @@ def main() -> None:
         "--no-quant-non-all-ones",
         action="store_true",
         help=(
-            "Force baseline + one-hot cases to run with clamp-only (dac/fourier/adc bits set to None). "
-            "This disables quantization noise while keeping the [0,1] range limiter."
+            "Force baseline + one-hot cases to run with quantization disabled (dac/fourier/adc bits set to None). "
+            "This disables quantization noise without adding an implicit quantization clamp."
         ),
     )
     parser.add_argument(

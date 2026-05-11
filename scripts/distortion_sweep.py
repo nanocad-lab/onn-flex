@@ -19,12 +19,11 @@ from plot_style import (
     DEFAULT_TITLE_FONTSIZE,
     SHOW_TITLES,
 )
-from onn_config import AppConfig
+from onn_config import AppConfig, load_app_config_from_yaml
+from onn_component import JTC
 from onn_inference import (
-    _build_jtc,
     compute_snr_enob,
     compute_snr_jps,
-    load_config_from_yaml,
     run_inference,
 )
 
@@ -379,7 +378,7 @@ def _compute_jtc_sndrs(cfg: AppConfig, num_tests: int = 1000, seed: int = 0) -> 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Current JTC
-    jtc_cur = _build_jtc(cfg).to(device)
+    jtc_cur = JTC(cfg).to(device)
 
     # Reference geometry (same distortion settings)
     ref_len = int(max(cfg.input_length, cfg.kernel_length))
@@ -388,7 +387,7 @@ def _compute_jtc_sndrs(cfg: AppConfig, num_tests: int = 1000, seed: int = 0) -> 
         jtc_separation=ref_len,
         jtc_total_field=ref_len * 6,
     )
-    jtc_ref = _build_jtc(ref_cfg).to(device)
+    jtc_ref = JTC(ref_cfg).to(device)
 
     out_list = []
     ref_list = []
@@ -591,7 +590,7 @@ def main() -> None:
                 "--config and --weights are required when not using --plot-only"
             )
 
-        base_cfg = load_config_from_yaml(args.config)
+        base_cfg = load_app_config_from_yaml(args.config)
         if args.max_eval_batches is not None:
             base_cfg = replace(base_cfg, max_eval_batches=int(args.max_eval_batches))
 

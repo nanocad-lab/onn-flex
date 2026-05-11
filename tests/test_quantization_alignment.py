@@ -3,7 +3,7 @@ Test suite for quantization bit selection alignment across backends.
 
 Tests:
 1. bits=None behavior - verify no quantization is applied when bits=None
-2. Quantization flow alignment - verify JTC emulation and Fourier backends use same bit config
+2. Quantization flow alignment - verify JTC emulation and JTC ideal backends use same bit config
 3. Gradient flow - verify gradients propagate through all quantization points
 4. fourier_plane_bits - verify fourier_plane_bits is applied correctly in JTC backend
 """
@@ -18,7 +18,8 @@ import torch
 import pytest
 from onn_config import AppConfig
 from onn_layers import FTconvlayer
-from onn_component import QuantDequant_STE, JTC
+from onn_component import JTC
+from onn_quantization import quantize_ste
 
 
 class TestQuantizationAlignment:
@@ -46,19 +47,17 @@ class TestQuantizationAlignment:
         torch.manual_seed(42)
         return torch.randn(2, 3, 32, 32)
 
-    def test_quantdequant_ste_none_bits(self):
-        """Test that QuantDequant_STE returns input unchanged when bits=None."""
+    def test_quantize_ste_none_bits(self):
+        """Test that bits=None is a true no-op without quantization or clamping."""
         x = torch.randn(10, 10)
-        x_quantized = QuantDequant_STE.apply(x, None)
+        x_quantized = quantize_ste(x, None)
 
-        # Should return exactly the same tensor
-        assert torch.allclose(x, x_quantized)
-        assert x is x_quantized
+        assert torch.equal(x, x_quantized)
 
-    def test_quantdequant_ste_with_bits(self):
-        """Test that QuantDequant_STE quantizes when bits is provided."""
+    def test_quantize_ste_with_bits(self):
+        """Test that shared STE quantization runs when bits is provided."""
         x = torch.randn(10, 10)
-        x_quantized = QuantDequant_STE.apply(x, 4)
+        x_quantized = quantize_ste(x, 4)
 
         # Should be different from input (unless input happened to be quantized)
         # Check that output is in expected range [0, 1] with 4-bit levels
@@ -74,12 +73,12 @@ class TestQuantizationAlignment:
             distances = torch.abs(expected_values - val)
             assert distances.min() < 1e-6
 
-    def test_layer_quantizer_none_bits(self, base_config, test_input):
-        """Test that layer _apply_quantizer handles None bits correctly."""
+    def test_layer_quantization_none_bits(self, base_config, test_input):
+        """Test that layer quantization handles None bits correctly."""
         base_config.dac_bits = None
         base_config.adc_bits = None
         base_config.fourier_plane_bits = None
-        base_config.conv_backend = "fourier"
+        base_config.conv_backend = "jtc_ideal"
 
         layer = FTconvlayer(
             in_channels=3,
@@ -133,9 +132,9 @@ class TestQuantizationAlignment:
         assert output.shape[1] == 16
         assert torch.isfinite(output).all()
 
-    def test_fourier_backend_fourier_plane_bits(self, base_config, test_input):
-        """Test that Fourier backend applies fourier_plane_bits quantization."""
-        base_config.conv_backend = "fourier"
+    def test_jtc_ideal_backend_fourier_plane_bits(self, base_config, test_input):
+        """Test that JTC ideal backend applies fourier_plane_bits quantization."""
+        base_config.conv_backend = "jtc_ideal"
         base_config.fourier_plane_bits = 4
 
         layer = FTconvlayer(
@@ -162,7 +161,7 @@ class TestQuantizationAlignment:
         unique_before = signal.unique().numel()
 
         # Apply 2-bit quantization (4 levels)
-        signal_quantized = QuantDequant_STE.apply(signal, 2)
+        signal_quantized = quantize_ste(signal, 2)
         unique_after = signal_quantized.unique().numel()
 
         # Should have fewer unique values after quantization
@@ -181,8 +180,8 @@ class TestQuantizationAlignment:
         signal_clamped = torch.clamp(signal, 0, 1)
         kernel_clamped = torch.clamp(kernel, 0, 1)
 
-        signal_quantized = QuantDequant_STE.apply(signal_clamped, base_config.dac_bits)
-        kernel_quantized = QuantDequant_STE.apply(kernel_clamped, base_config.dac_bits)
+        signal_quantized = quantize_ste(signal_clamped, base_config.dac_bits)
+        kernel_quantized = quantize_ste(kernel_clamped, base_config.dac_bits)
 
         # Compute a simple loss
         loss = signal_quantized.sum() + kernel_quantized.sum()
@@ -202,7 +201,7 @@ class TestQuantizationAlignment:
         signal = torch.rand(1, 8, requires_grad=True)
 
         # Apply Fourier plane quantization
-        signal_quantized = QuantDequant_STE.apply(
+        signal_quantized = quantize_ste(
             signal, base_config.fourier_plane_bits
         )
 
@@ -222,7 +221,7 @@ class TestQuantizationAlignment:
         signal = torch.rand(1, 8, requires_grad=True)
 
         # Apply ADC quantization
-        signal_quantized = QuantDequant_STE.apply(signal, base_config.adc_bits)
+        signal_quantized = quantize_ste(signal, base_config.adc_bits)
 
         # Compute loss
         loss = signal_quantized.sum()
@@ -262,9 +261,9 @@ class TestQuantizationAlignment:
         assert layer.weight.grad is not None
         assert torch.isfinite(layer.weight.grad).all()
 
-    def test_full_gradient_flow_fourier(self, base_config, test_input):
-        """Test that gradients flow through the entire Fourier backend pipeline."""
-        base_config.conv_backend = "fourier"
+    def test_full_gradient_flow_jtc_ideal(self, base_config, test_input):
+        """Test that gradients flow through the entire JTC ideal backend pipeline."""
+        base_config.conv_backend = "jtc_ideal"
 
         layer = FTconvlayer(
             in_channels=3,
@@ -316,7 +315,7 @@ class TestQuantizationAlignment:
         base_config.adc_bits = None
         base_config.fourier_plane_bits = None
 
-        for backend in ["fourier", "jtc_emulation"]:
+        for backend in ["jtc_ideal", "jtc_emulation"]:
             base_config.conv_backend = backend
 
             layer = FTconvlayer(

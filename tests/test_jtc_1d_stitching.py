@@ -43,14 +43,14 @@ def test_1d_single_pass_matches_pytorch():
     signal = torch.rand(M) * 0.5 + 0.5
     kernel = torch.rand(N) * 0.5 + 0.5
 
-    # Set weights
+    # Set weight
     with torch.no_grad():
-        layer.weights.data = kernel.view(1, 1, 1, N)
+        layer.weight.data = kernel.view(1, 1, 1, N)
 
     # JTC output
     signal_4d = signal.view(1, 1, 1, M)
     weight_2d = kernel.unsqueeze(0)
-    jtc_output = layer.fourier_conv_forward(signal_4d, weight_2d).squeeze()
+    jtc_output = layer.jtc_ideal_forward(signal_4d, weight_2d).squeeze()
 
     # PyTorch correlation (full padding gives M+N-1 outputs)
     signal_pt = signal.unsqueeze(0).unsqueeze(0)
@@ -109,7 +109,7 @@ def test_1d_stitching_two_passes():
     kernel = torch.rand(N) * 0.5 + 0.5
 
     with torch.no_grad():
-        layer.weights.data = kernel.view(1, 1, 1, N)
+        layer.weight.data = kernel.view(1, 1, 1, N)
 
     weight_2d = kernel.unsqueeze(0)
 
@@ -148,7 +148,7 @@ def test_1d_stitching_two_passes():
 
         # Run JTC
         patch_4d = patch.view(1, 1, 1, M)
-        jtc_output = layer.fourier_conv_forward(patch_4d, weight_2d).squeeze()
+        jtc_output = layer.jtc_ideal_forward(patch_4d, weight_2d).squeeze()
 
         print(f"\n  Pass {pass_idx}: patch[{patch_start}:{patch_end}]")
         print(f"    JTC output: {jtc_output}")

@@ -19,9 +19,8 @@ from plot_style import (
     DEFAULT_TITLE_FONTSIZE,
     SHOW_TITLES,
 )
-from onn_config import AppConfig
+from onn_config import AppConfig, load_app_config_from_yaml
 from onn_component import get_coeffs, get_ideal_degree
-from onn_inference import load_config_from_yaml
 from scripts.distortion_sweep import ACC_YLIM, SNDR_YLIM
 
 # Apply shared Matplotlib style (labels/ticks/titles)
@@ -312,7 +311,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    cfg = load_config_from_yaml(args.config)
+    cfg = load_app_config_from_yaml(args.config)
     generate_combined_component_plots(
         cfg, args.sweep_dir, args.output_dir, args.include_ler
     )

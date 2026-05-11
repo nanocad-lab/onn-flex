@@ -14,69 +14,68 @@ def compute_contamination_profile(
 ) -> tuple[int, int, int]:
     """Compute contamination profile for JTC configuration.
 
-    Physics: JTC output = autocorr(signal) + autocorr(kernel) + cross-correlation
-    - Autocorr region centered at lens_size//2, length 2*max(M,N)-1
-    - Cross-corr extracted starting at lens_size//2 + sep + N//2, length M+N-1
-    - For valid convolution stitching: use correlation indices [N-1, M-1] → M-N+1 outputs
-    - Contamination = (autocorr_at_index) / (total_at_index)
+    Physics: JTC output contains autocorrelation terms plus two mirrored
+    cross-correlation lobes. A valid output is clean only if the extracted lag
+    is in the desired cross-correlation support and is not overlapped by either
+    autocorrelation or the mirrored cross-correlation support.
 
     Returns:
         total_outputs: Total M+N-1 correlation outputs
         clean_valid_outputs: Number of clean valid convolution outputs (subset of M-N+1)
-        effective_stride: Stride for tile stitching (clean valid outputs per pass)
+        effective_stride: Contiguous clean prefix usable for tile stitching
     """
     M, N = input_len, kernel_len
 
-    if input_len + kernel_len + sep > lens_size:
+    if M <= 0 or N <= 0 or lens_size <= 0:
+        return 0, 0, 0
+    if M < N:
+        return 0, 0, 0
+    if sep < 0:
+        return 0, 0, 0
+    if M + N + sep > lens_size:
         return 0, 0, 0
 
-    # Physics-based analysis
-    autocorr_center = lens_size // 2
-    autocorr_length = 2 * max(M, N) - 1
-
-    # Extraction start (formula without +1, as analysis shows)
-    extraction_start = lens_size // 2 + sep + N // 2
     total_outputs = M + N - 1
 
-    # For valid convolution stitching, we only use correlation outputs [N-1, M-1]
-    # This gives M-N+1 valid outputs per patch
-    valid_start_idx = N - 1
-    valid_end_idx = M  # exclusive
-    num_valid_outputs = M - N + 1
+    def lag_range(start: int, stop: int) -> set[int]:
+        width = stop - start
+        if width <= 0:
+            return set()
+        if width >= lens_size:
+            return set(range(lens_size))
+        return {lag % lens_size for lag in range(start, stop)}
 
-    # Check which valid outputs are clean (outside autocorr region)
-    clean_valid_count = 0
+    # Autocorrelation support is centered at zero lag before fftshift. We work
+    # in lag coordinates modulo L, so zero lag is 0 rather than L//2.
+    autocorr = lag_range(-(M - 1), M) | lag_range(-(N - 1), N)
 
-    for i in range(valid_start_idx, valid_end_idx):
-        idx = (extraction_start + i) % lens_size
+    # The signal starts D samples after the kernel start in the input plane.
+    # Desired cross support is signal-position minus kernel-position. The JTC
+    # also produces the mirrored lobe at the negative of those lags.
+    d = N + sep
+    desired_cross = lag_range(d - (N - 1), d + M)
+    mirrored_cross = lag_range(-(d + M - 1), -(d - (N - 1)) + 1)
 
-        # Distance from autocorr center
-        dist_from_center = min(
-            abs(idx - autocorr_center),
-            abs(idx - autocorr_center + lens_size),
-            abs(idx - autocorr_center - lens_size),
+    clean_flags: list[bool] = []
+    valid_start = 0 if N == 1 else (N + 1) // 2
+    valid_end = valid_start + (M - N + 1)
+    same_length_shift = 1 if N == 1 else 0
+    for i in range(valid_start, valid_end):
+        # This matches JTC._build_correlation_start() with the fftshift center
+        # removed: physical_index = L//2 + sep + N//2 + i.
+        lag = (sep + N // 2 + same_length_shift + i) % lens_size
+        clean_flags.append(
+            lag in desired_cross
+            and lag not in autocorr
+            and lag not in mirrored_cross
         )
 
-        # Clean if distance > half autocorr length
-        if dist_from_center > autocorr_length // 2:
-            clean_valid_count += 1
-
-    # Effective stride for stitching valid convolution:
-    # Use conservative estimate to avoid autocorr edge effects
-    # Empirically, the last valid output often has some contamination even when
-    # geometric analysis suggests it's clean
-
-    if clean_valid_count == num_valid_outputs:
-        # All valid outputs appear clean - use M-N+1 but be conservative for small configs
-        if num_valid_outputs <= 6:
-            effective_stride = max(
-                num_valid_outputs - 1, 1
-            )  # Conservative: exclude last output
-        else:
-            effective_stride = num_valid_outputs  # Large enough to trust
-    else:
-        # Some contamination detected - use clean count
-        effective_stride = clean_valid_count if clean_valid_count > 0 else 0
+    clean_valid_count = sum(clean_flags)
+    effective_stride = 0
+    for is_clean in clean_flags:
+        if not is_clean:
+            break
+        effective_stride += 1
 
     return total_outputs, clean_valid_count, effective_stride
 

@@ -13,12 +13,12 @@ python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/run
 python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/runs_pytorch/ --conv-backend pytorch --batch-size 128
 ```
 
-## Training with Fourier Conv (FFT-based alternative to JTC)
+## Training with Ideal JTC Conv
 ```bash
 python onn_main.py \
   --config-file configs/config_ideal.yaml \
-  --output-dir runs/runs_fft/ \
-  --conv-backend fourier \
+  --output-dir runs/runs_jtc_ideal/ \
+  --conv-backend jtc_ideal \
   --batch-size 128
 ```
 
@@ -26,8 +26,8 @@ python onn_main.py \
 ```bash
 python onn_main.py \
   --config-file configs/config_ideal.yaml \
-  --output-dir runs/runs_fft_q/ \
-  --conv-backend fourier \
+  --output-dir runs/runs_jtc_ideal_q/ \
+  --conv-backend jtc_ideal \
   --fourier-plane-bits 6 \
   --batch-size 128
 ```
@@ -37,9 +37,9 @@ python onn_main.py \
 python onn_main.py --config-file configs/config_ideal.yaml --output-dir runs/pretrain_only/ --pretrain-tests-only
 ```
 
-## Quantlevel sweep (ste_maxscale, 8 GPUs)
+## Quantlevel sweep (STE, 8 GPUs)
 ```bash
-python scripts/sweep_quantlevel_ste_maxscale.py --gpus 0,1,2,3,4,5,6,7
+python scripts/sweep_quantlevel_ste.py --gpus 0,1,2,3,4,5,6,7
 ```
 
 # Distortion Sweep Analysis

@@ -22,18 +22,6 @@ def parse_initial_args() -> tuple[str | None, str | None]:
     return args.config_file, args.output_dir
 
 
-def load_yaml_config(config_path: str) -> AppConfig:
-    """Load application config from YAML file."""
-    try:
-        return load_app_config_from_yaml(config_path)
-    except FileNotFoundError:
-        print(f"Config file {config_path} not found. Using defaults.")
-        return AppConfig()
-    except Exception as e:
-        print(f"Error loading config: {str(e)}. Using defaults.")
-        return AppConfig()
-
-
 def _str2bool(v: str) -> bool:
     if isinstance(v, bool):
         return v
@@ -129,13 +117,13 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--dac-bits",
         type=_optional_int,
         default=yaml_config.dac_bits,
-        help="DAC bits for quantization; use 'none' to keep clamp-only with no quantization noise",
+        help="DAC bits for quantization; use 'none' to disable DAC quantization",
     )
     parser.add_argument(
         "--adc-bits",
         type=_optional_int,
         default=yaml_config.adc_bits,
-        help="ADC bits for quantization; use 'none' to keep clamp-only with no quantization noise",
+        help="ADC bits for quantization; use 'none' to disable ADC quantization",
     )
     parser.add_argument(
         "--scale-output",
@@ -267,10 +255,10 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--conv-backend",
         type=str,
         default=yaml_config.conv_backend,
-        choices=["pytorch", "fourier", "jtc_emulation"],
+        choices=["pytorch", "jtc_ideal", "jtc_emulation"],
         help=(
             "Convolution backend: 'pytorch' (PyTorch conv2d), "
-            "'fourier' (FFT-based software JTC), or "
+            "'jtc_ideal' (ideal JTC optical model), or "
             "'jtc_emulation' (full hardware JTC emulation)"
         ),
     )
@@ -278,24 +266,7 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         "--fourier-plane-bits",
         type=_optional_int,
         default=yaml_config.fourier_plane_bits,
-        help="Quantization bits used in the Fourier plane; use 'none' to keep clamp-only",
-    )
-
-    # Quantizer selection (single)
-    parser.add_argument(
-        "--quantizer",
-        dest="quantizer",
-        type=str,
-        default=yaml_config.quantizer,
-        choices=[
-            "ste_clipped",
-            "ste_maxscale",
-            "ios",
-            "mad",
-            "mph",
-            "pwl",
-        ],
-        help="Quantizer type for activations, weights, outputs, and Fourier plane",
+        help="Quantization bits used in the Fourier plane; use 'none' to disable it",
     )
 
     # Optional activation normalization inside identical blocks
@@ -305,6 +276,38 @@ def parse_cli_args(yaml_config: AppConfig) -> AppConfig:
         action="store_true",
         default=yaml_config.normalize_blocks,
         help="Normalize activations after each identical block",
+    )
+    parser.add_argument(
+        "--enable-jtc-batched-fast-path",
+        dest="enable_jtc_batched_fast_path",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=yaml_config.enable_jtc_batched_fast_path,
+        help=(
+            "Enable batched JTC calls to reduce launch overhead (true/false)"
+        ),
+    )
+    parser.add_argument(
+        "--enable-jtc-ideal-fused-transfer",
+        dest="enable_jtc_ideal_fused_transfer",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=yaml_config.enable_jtc_ideal_fused_transfer,
+        help=(
+            "Use fused ideal JTC transfer functions when the configured "
+            "transfer curves are ideal (true/false)"
+        ),
+    )
+    parser.add_argument(
+        "--show-progress",
+        dest="show_progress",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=yaml_config.show_progress,
+        help="Show tqdm training progress bars (true/false)",
     )
 
     # ------------------------------------------------------------------
@@ -406,18 +409,13 @@ def main():
         raise ValueError("Output directory is required")
 
     # Step 2: Load config from YAML if provided, otherwise use defaults
-    yaml_config = AppConfig()  # Start with defaults
+    yaml_config = AppConfig()
     if config_path:
-        yaml_config = load_yaml_config(config_path)
-        # Update config_file to preserve the path
+        yaml_config = load_app_config_from_yaml(config_path)
         yaml_config.config_file = config_path
 
     # Step 3: Parse CLI args using YAML values as defaults
     final_config = parse_cli_args(yaml_config)
-
-    # Ensure we preserve the config_file path from initial parsing
-    if config_path and not final_config.config_file:
-        final_config.config_file = config_path
 
     # Step 4: Save the final config to output_dir/config.yaml
     saved_path = save_config(final_config, final_config.output_dir)
