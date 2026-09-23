@@ -7,9 +7,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import torch.nn.functional as F
+
 from onn_config import AppConfig
 from onn_layers import FTconvlayer
-from jtc_cycle_planner import compute_contamination_profile
+from onn_shotplan import compute_contamination_profile
 
 
 def test_1d_single_pass_matches_pytorch():

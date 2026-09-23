@@ -9,6 +9,13 @@ __pycache__/
 # datasets
 data/
 
+# Local reference papers (cite them in docs; do not redistribute PDFs)
+papers/
+
+# Local experiment history, intermediate tools and reproduction snippets
+/experiments/
+/context/
+
 # results
 runs/
 runs_mfd/
@@ -95,6 +102,7 @@ __pypackages__/
 
 # Environments
 .env
+.env.*
 .envrc
 .venv
 env/
@@ -132,3 +140,8 @@ dmypy.json
 
 # PyPI configuration file
 .pypirc
+
+# Private operator notes and generated notebook figure
+/docs_operations.local.md
+/pd_tia_two_fits.pdf
+AGENTS.md

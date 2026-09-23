@@ -12,19 +12,32 @@ import numpy as np
 import pandas as pd
 from matplotlib.axes import Axes
 
+from onn_component import (
+    _compute_linear_coeffs,
+    _sqrt_clamped,
+    get_coeffs,
+    get_ideal_degree,
+)
+from onn_config import AppConfig, load_app_config_from_yaml
 from plot_style import (
-    apply_global_plot_style,
     DEFAULT_AXIS_LABEL_FONTSIZE,
     DEFAULT_TICK_LABEL_FONTSIZE,
     DEFAULT_TITLE_FONTSIZE,
     SHOW_TITLES,
+    apply_global_plot_style,
 )
-from onn_config import AppConfig, load_app_config_from_yaml
-from onn_component import get_coeffs, get_ideal_degree
 from scripts.distortion_sweep import ACC_YLIM, SNDR_YLIM
 
 # Apply shared Matplotlib style (labels/ticks/titles)
 apply_global_plot_style()
+
+
+def _mask_unphysical_sndr(values):
+    """Hide SNDR points where distortion is exactly zero (inf or
+    clamp-floor artifacts of several thousand dB)."""
+    vals = np.asarray(values, dtype=float).copy()
+    vals[~np.isfinite(vals) | (vals > 200.0)] = np.nan
+    return vals
 
 
 def _load_sweep_results(
@@ -82,10 +95,20 @@ def _plot_sweep_on_axes(
 
     ax2 = ax1.twinx()
     sndr_line = ax2.plot(
-        strengths, sndrs, "r^-", label="SNDR (pJTC output)", markersize=ms, linewidth=lw
+        strengths,
+        _mask_unphysical_sndr(sndrs),
+        "r^-",
+        label="SNDR (pJTC output)",
+        markersize=ms,
+        linewidth=lw,
     )[0]
     jps_line = ax2.plot(
-        strengths, jps_sndrs, "gs--", label="SNDR (JPS)", markersize=ms, linewidth=lw
+        strengths,
+        _mask_unphysical_sndr(jps_sndrs),
+        "gs--",
+        label="SNDR (JPS)",
+        markersize=ms,
+        linewidth=lw,
     )[0]
     ax2.set_ylabel("SNDR (dB)", color="r", fontsize=label_fs)
     ax2.set_ylim(SNDR_YLIM)
@@ -120,7 +143,8 @@ def _plot_fit_on_axes(
     csv_path: str,
     poly_order: int | None,
     tag: str,
-    ref_degree: int = 1,
+    *,
+    linearization: str,
     compact: bool = False,
 ) -> bool:
     """Render the fit comparison plot onto the provided axes.
@@ -133,20 +157,29 @@ def _plot_fit_on_axes(
 
     data = pd.read_csv(csv_path)
     x = data["input"].values
+    transform = _sqrt_clamped if tag == "mrm_amplitude" else None
     y = data["output"].values
+    if transform is not None:
+        y = transform(y)
 
-    # Reference behaviour (linear fit unless overridden per component)
+    # Match the component model's configured ideal reference and units.
     if tag == "mrm_phase":
         y_ref = np.zeros_like(x)
         ref_label = "Ideal (0.0)"
     else:
-        ref_coeff = np.polyfit(x, y, ref_degree)
+        ref_coeff = _compute_linear_coeffs(
+            csv_path, output_transform=transform, linearization=linearization
+        )
         y_ref = np.polyval(ref_coeff, x)
-        ref_label = f"Ideal (deg {ref_degree})"
+        ref_label = f"Ideal ({linearization})"
 
     # Distortion polynomial fit
-    degree = poly_order or get_ideal_degree(csv_path)
-    poly_coeff = get_coeffs(csv_path, degree)
+    degree = (
+        get_ideal_degree(csv_path, output_transform=transform)
+        if poly_order is None
+        else poly_order
+    )
+    poly_coeff = get_coeffs(csv_path, degree, output_transform=transform)
     y_poly = np.polyval(poly_coeff, x)
 
     # R^2
@@ -168,7 +201,7 @@ def _plot_fit_on_axes(
     )
     (line_data,) = ax.plot(x, y, "k.", label="CSV data", markersize=ms)
     ax.set_xlabel("Input", fontsize=label_fs)
-    ax.set_ylabel("Output", fontsize=label_fs)
+    ax.set_ylabel("Field amplitude (√W)" if transform else "Output", fontsize=label_fs)
     if SHOW_TITLES and not compact:
         ax.set_title(f"{tag} distortion fit", fontsize=DEFAULT_TITLE_FONTSIZE)
     legend_fs = 8 if compact else DEFAULT_TICK_LABEL_FONTSIZE
@@ -211,42 +244,37 @@ def generate_combined_component_plots(
             "driver",
             config.driver_distortion_data_path,
             config.driver_distortion_polyfit_order,
-            1,
         ),
         (
             "pd_distortion_strength",
             "pd",
             config.pd_distortion_data_path,
             config.pd_distortion_polyfit_order,
-            2,
         ),
         (
             "tia_distortion_strength",
             "tia",
             config.tia_distortion_data_path,
             config.tia_distortion_polyfit_order,
-            1,
         ),
         (
-            "mrm_power_distortion_strength",
-            "mrm_power",
-            config.mrm_power_data_path,
-            config.mrm_power_polyfit_order,
-            1,
+            "mrm_amplitude_distortion_strength",
+            "mrm_amplitude",
+            config.mrm_amplitude_data_path,
+            config.mrm_amplitude_polyfit_order,
         ),
         (
             "mrm_phase_distortion_strength",
             "mrm_phase",
             config.mrm_phase_data_path,
             config.mrm_phase_polyfit_order,
-            1,
         ),
     ]
 
     if include_ler:
-        components.append(("ler_std_dev", "ler", "", None, 1))
+        components.append(("ler_std_dev", "ler", "", None))
 
-    for param, tag, csv_path, poly_order, ref_degree in components:
+    for param, tag, csv_path, poly_order in components:
         sweep = _load_sweep_results(sweep_output_dir, param)
         if sweep is None:
             print(f"[SKIP] No sweep data for {tag} ({param})")
@@ -259,14 +287,25 @@ def generate_combined_component_plots(
         fig, axes = plt.subplots(1, 2, figsize=figsize)
         # Right panel: distortion sweep; Left panel: CSV fit
         _plot_sweep_on_axes(
-            axes[1], param, strengths, accs, sndrs, jps_sndrs, compact=ieee_compact
+            axes[1],
+            param,
+            strengths,
+            accs,
+            sndrs,
+            jps_sndrs,
+            compact=ieee_compact,
         )
 
         # Fit panel may be absent if CSV not available (e.g., LER)
         have_fit = False
         if csv_path:
             have_fit = _plot_fit_on_axes(
-                axes[0], csv_path, poly_order, tag, ref_degree, compact=ieee_compact
+                axes[0],
+                csv_path,
+                poly_order,
+                tag,
+                linearization=config.transfer_linearization,
+                compact=ieee_compact,
             )
 
         if not have_fit:
@@ -278,9 +317,12 @@ def generate_combined_component_plots(
 
         fig.tight_layout()
         out_path = os.path.join(out_dir, f"{tag}_combined.pdf")
+        png_path = os.path.join(out_dir, f"{tag}_combined.png")
         fig.savefig(out_path, bbox_inches="tight", pad_inches=0.02)
+        fig.savefig(png_path, bbox_inches="tight", pad_inches=0.02, dpi=220)
         plt.close(fig)
         print(f"[COMBINED] Saved {out_path}")
+        print(f"[COMBINED] Saved {png_path}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -313,7 +355,10 @@ def main() -> None:
     args = _parse_args()
     cfg = load_app_config_from_yaml(args.config)
     generate_combined_component_plots(
-        cfg, args.sweep_dir, args.output_dir, args.include_ler
+        cfg,
+        args.sweep_dir,
+        args.output_dir,
+        include_ler=args.include_ler,
     )
 
 

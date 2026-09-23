@@ -13,18 +13,18 @@ import torch
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from plot_style import (
-    apply_global_plot_style,
-    DEFAULT_TICK_LABEL_FONTSIZE,
-    DEFAULT_TITLE_FONTSIZE,
-    SHOW_TITLES,
-)
-from onn_config import AppConfig, load_app_config_from_yaml
 from onn_component import JTC
+from onn_config import AppConfig, load_app_config_from_yaml
 from onn_inference import (
     compute_snr_enob,
     compute_snr_jps,
     run_inference,
+)
+from plot_style import (
+    DEFAULT_TICK_LABEL_FONTSIZE,
+    DEFAULT_TITLE_FONTSIZE,
+    SHOW_TITLES,
+    apply_global_plot_style,
 )
 
 # Apply shared Matplotlib style (labels/ticks/titles)
@@ -34,7 +34,7 @@ PARAMS = [
     "driver_distortion_strength",
     "pd_distortion_strength",
     "tia_distortion_strength",
-    "mrm_power_distortion_strength",
+    "mrm_amplitude_distortion_strength",
     "mrm_phase_distortion_strength",
     "ler_std_dev",
     "lens_distortion_strength",
@@ -77,6 +77,14 @@ PD_NOISE_W_SWEEP = np.concatenate(
         ),
     )
 )
+
+
+def _mask_unphysical_sndr(values):
+    """Hide SNDR points where distortion is exactly zero (inf or
+    clamp-floor artifacts of several thousand dB)."""
+    vals = np.asarray(values, dtype=float).copy()
+    vals[~np.isfinite(vals) | (vals > 200.0)] = np.nan
+    return vals
 
 
 def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
@@ -151,8 +159,12 @@ def _plot_param_sweep_from_data(param: str, out_dir: str) -> None:
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
-    ax2.plot(strengths_plot, sndrs, "r^-", label="SNDR (pJTC output)")
-    ax2.plot(strengths_plot, jps_sndrs, "gs--", label="SNDR (JPS)")
+    ax2.plot(
+        strengths_plot, _mask_unphysical_sndr(sndrs), "r^-", label="SNDR (pJTC output)"
+    )
+    ax2.plot(
+        strengths_plot, _mask_unphysical_sndr(jps_sndrs), "gs--", label="SNDR (JPS)"
+    )
     ax2.set_ylabel("SNDR (dB)", color="r")
     ax2.set_ylim(SNDR_YLIM)
     # Combine legends from both axes into a single legend
@@ -338,8 +350,12 @@ def _sweep_param(
     if SHOW_TITLES:
         ax1.set_title(f"{param} sweep", fontsize=DEFAULT_TITLE_FONTSIZE)
     ax2 = ax1.twinx()
-    ax2.plot(strengths_plot, sndrs, "r^-", label="SNDR (pJTC output)")
-    ax2.plot(strengths_plot, jps_sndrs, "gs--", label="SNDR (JPS)")
+    ax2.plot(
+        strengths_plot, _mask_unphysical_sndr(sndrs), "r^-", label="SNDR (pJTC output)"
+    )
+    ax2.plot(
+        strengths_plot, _mask_unphysical_sndr(jps_sndrs), "gs--", label="SNDR (JPS)"
+    )
     ax2.set_ylabel("SNDR (dB)", color="r")
     ax2.set_ylim(SNDR_YLIM)
     # Combine legends from both axes into a single legend

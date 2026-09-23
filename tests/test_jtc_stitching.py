@@ -6,11 +6,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
+
 from jtc_cycle_planner import (
-    usable_outputs,
-    compute_contamination_profile,
     cycles_for_config,
+    usable_outputs,
 )
+from onn_shotplan import compute_contamination_profile
 
 
 class TestContaminationProfile:

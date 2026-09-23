@@ -88,9 +88,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=str,
-        default=str(
-            repo_root / "sweep_results" / "quantlevel_ste_acm_singlecol.pdf"
-        ),
+        default=str(repo_root / "sweep_results" / "quantlevel_ste_acm_singlecol.pdf"),
         help="Output PDF path.",
     )
     parser.add_argument(

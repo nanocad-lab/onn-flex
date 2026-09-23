@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
 
+from onn_component import JTC, raise_dynamo_recompile_limit
 from onn_config import AppConfig
-from onn_component import JTC
 from onn_jtc_conv2d import JTCConv2d, replace_conv2d_with_jtc
 from onn_math import complex_abs_squared, sqrt_nonnegative_with_finite_grad
 from onn_quantization import quantize_ste
@@ -20,13 +20,17 @@ class _ConvNd(nn.Module):
         "padding",
         "dilation",
         "groups",
-        "bias",
         "padding_mode",
         "output_padding",
         "in_channels",
         "out_channels",
         "kernel_size",
     ]
+
+    # Note: this layer intentionally has no bias parameter. A bias was once
+    # registered but never applied by any forward path, which stalled DDP's
+    # reducer (a parameter that never receives a gradient). Checkpoints must
+    # match the current parameter and calibration-buffer schema.
 
     def __init__(
         self,
@@ -40,7 +44,6 @@ class _ConvNd(nn.Module):
         transposed: bool,
         output_padding: tuple[int, int],
         groups: int,
-        bias: bool,
         padding_mode: str,
         kernel_length: int | None = None,
     ):
@@ -66,18 +69,10 @@ class _ConvNd(nn.Module):
             torch.Tensor(in_channels, out_channels // groups, weight_dim, 2)
         )
         self.cout_per_cin = out_channels // groups
-        if bias:
-            self.bias = nn.Parameter(torch.Tensor(out_channels))
-        else:
-            self.register_parameter("bias", None)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in)
-            init.uniform_(self.bias, -bound, bound)
 
 
 class FTconvlayer(_ConvNd):
@@ -96,11 +91,18 @@ class FTconvlayer(_ConvNd):
         padding: int = 0,
         dilation: int = 1,
         groups: int = 1,
-        bias: bool = True,
         padding_mode: str = "zeros",
         vertical: bool = False,
         hv_concat: bool = False,
     ):
+        # FTconvlayer's patch-based correlation does not implement striding,
+        # padding, or dilation; refuse loudly rather than silently ignore
+        # them (JTCConv2d supports all three).
+        if stride != 1 or padding != 0 or dilation != 1:
+            raise ValueError(
+                "FTconvlayer only supports stride=1, padding=0, dilation=1; "
+                "use JTCConv2d for strided/padded/dilated convolutions"
+            )
         # Store config first so we can access it
         self.config = config
 
@@ -115,7 +117,6 @@ class FTconvlayer(_ConvNd):
             False,
             (0, 0),
             groups,
-            bias,
             padding_mode,
             kernel_length=config.kernel_length,  # Pass kernel_length from config
         )
@@ -124,6 +125,30 @@ class FTconvlayer(_ConvNd):
         self.PIC_CONV = None
         if self.config.conv_backend == "jtc_emulation":
             self.PIC_CONV = JTC(config)
+        # Optionally compile the batched signed conv end to end. Compiling at
+        # this level (instead of only the JTC shot pipeline) lets the compiler
+        # fuse the large signal/kernel pair broadcasts into the first pipeline
+        # kernels instead of materializing them as standalone copies.
+        self._batched_signed = self._make_batched_signed_pipeline()
+
+    def _make_batched_signed_pipeline(self):
+        if bool(getattr(self.config, "compile_jtc", False)):
+            raise_dynamo_recompile_limit()
+            return torch.compile(
+                self._conv_forward_jtc_batched_signed_impl, dynamic=True
+            )
+        return self._conv_forward_jtc_batched_signed_impl
+
+    def __getstate__(self):
+        # A torch.compile-wrapped bound method is not picklable; rebuild it on
+        # load instead of serializing it (full-model torch.save / deepcopy).
+        state = dict(self.__dict__)
+        state.pop("_batched_signed", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._batched_signed = self._make_batched_signed_pipeline()
 
     # ---------------- Internal helpers ------------------
     def _validate_backend_sizes(
@@ -166,6 +191,7 @@ class FTconvlayer(_ConvNd):
                         f"required size ({required_size} = input_length + kernel_length + separation). "
                         f"This may cause errors or aliasing artifacts.",
                         UserWarning,
+                        stacklevel=2,
                     )
 
     def jtc_emulation_forward(
@@ -221,19 +247,8 @@ class FTconvlayer(_ConvNd):
             output = quantize_ste(output, self.config.adc_bits)
         return output
 
-    def jtc_ideal_forward(
-        self, x: torch.Tensor, weight: torch.Tensor
-    ) -> torch.Tensor:
-        """Ideal JTC-style correlation via FFT with optional JPS quantization.
-
-        Implements the provided block using plane_size=config.jtc_total_field and
-        sep=config.jtc_separation, and quantizes at jps_batch if enabled.
-
-        Shapes:
-        - x: B H 1 W
-        - weight: Cout W
-        Returns: B H Cout W
-        """
+    def jtc_ideal_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Ideal JTC-style correlation via FFT with optional JPS quantization."""
         if x.dim() != 4 or weight.dim() != 2:
             raise ValueError("Unexpected shapes for jtc_ideal_forward")
 
@@ -251,112 +266,78 @@ class FTconvlayer(_ConvNd):
             x = quantize_ste(x, self.config.dac_bits)
             weight = quantize_ste(weight, self.config.dac_bits)
 
-        # Repeat to pair each signal with each kernel (per-output channel)
-        input_full = x.repeat(1, 1, cout, 1)  # B H Cout W
-        weight_full = (
-            weight.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
-        )  # B H Cout W
+        input_full = x.repeat(1, 1, cout, 1)
+        weight_full = weight.unsqueeze(0).unsqueeze(0).repeat(batch_size, height, 1, 1)
 
-        # Save shapes
         B = input_full.shape[0]
         H = input_full.shape[1]
         C = input_full.shape[2]
-        M = input_full.shape[-1]  # input length
-        N = weight_full.shape[-1]  # kernel length
+        M = input_full.shape[-1]
+        N = weight_full.shape[-1]
 
         if input_full.shape[:-1] != weight_full.shape[:-1]:
             raise ValueError(
                 "Input signal and kernel_weights must have matching batch dimensions."
             )
 
-        # Flatten for batch JTC processing: [B*H*C, 8]
         batch_size_for_jtc = B * H * C
         signal_reshaped = input_full.reshape(batch_size_for_jtc, M)
         kernel_reshaped = weight_full.reshape(batch_size_for_jtc, N)
 
-        # Parameters from config
         sep = int(self.config.jtc_separation)
         plane_size = max(int(self.config.jtc_total_field), M + N + sep)
 
-        # JTC (Joint Transform Correlator) simulation - emulating real optical physics
-        # JTC computes correlation via Joint Power Spectrum, outputs are magnitudes (always positive)
-
-        # Build input plane: place kernel [0:N], signal [N+sep:N+sep+M]
         input_plane = torch.zeros(
             batch_size_for_jtc, plane_size, dtype=torch.complex64, device=x.device
         )
-
-        kernel_complex = kernel_reshaped.to(torch.complex64)
-        signal_complex = signal_reshaped.to(torch.complex64)
 
         kernel_start = 0
         kernel_end = kernel_start + N
         signal_start = kernel_end + sep
         signal_end = signal_start + M
 
-        input_plane[:, kernel_start:kernel_end] = kernel_complex
-        input_plane[:, signal_start:signal_end] = signal_complex
+        input_plane[:, kernel_start:kernel_end] = kernel_reshaped.to(torch.complex64)
+        input_plane[:, signal_start:signal_end] = signal_reshaped.to(torch.complex64)
 
-        # Roll to center the input pattern
         roll_amount = (plane_size // 2) - (M + signal_start) // 2
         input_plane = torch.roll(input_plane, shifts=roll_amount, dims=-1)
 
-        # JTC physics: FFT -> fftshift -> Joint Power Spectrum (JPS)
         jft = torch.fft.fft(input_plane, dim=-1)
-        jft_shifted = torch.fft.fftshift(jft, dim=-1)
-        jps = complex_abs_squared(jft_shifted) / plane_size
+        jps = complex_abs_squared(torch.fft.fftshift(jft, dim=-1)) / plane_size
 
         if self.config.adc_bits is not None:
             jps = quantize_ste(jps, self.config.adc_bits)
-
-        # Quantize at JPS if enabled (Fourier plane quantization)
         if self.config.fourier_plane_bits is not None:
             jps = quantize_ste(jps, self.config.fourier_plane_bits)
-
         if self.config.dac_bits is not None:
             jps = quantize_ste(jps, self.config.dac_bits)
 
-        # Back to output plane: FFT -> fftshift -> magnitude, then final
-        # square-law detection with ideal sqrt amplitude recovery.
         output_plane_fft = torch.fft.fft(jps, dim=-1)
         output_plane_shifted = torch.fft.fftshift(output_plane_fft, dim=-1)
         output_plane_abs = torch.abs(output_plane_shifted)
         output_plane_power = output_plane_abs * output_plane_abs
         if self.config.scale_output == "adc":
-            output_plane_power = output_plane_power / output_plane_power.max().clamp_min(
-                1e-12
+            output_plane_power = (
+                output_plane_power / output_plane_power.max().clamp_min(1e-12)
             )
         output_plane_power = quantize_ste(output_plane_power, self.config.adc_bits)
         output_plane = sqrt_nonnegative_with_finite_grad(output_plane_power)
 
-        # Extract full correlation (M+N-1 outputs) if config allows
-        # For properly sized planes with adequate separation, full correlation is overlap-free
         if self.config.output_length is not None:
             output_length = self.config.output_length
         else:
-            # Default: extract full correlation length (M+N-1)
             output_length = M + N - 1
 
         same_start = plane_size // 2 + sep + N // 2
         if output_length == M:
-            # PyTorch's padding="same" returns the centered M samples from the
-            # full linear correlation. Under this JTC placement the extracted
-            # cross-correlation term is one sample earlier, so advance the
-            # output window to make the ideal JTC backend match PyTorch.
             same_start += 1
 
-        # Extract indices, wrapping around plane_size
         output_indices = (
             torch.arange(same_start, same_start + output_length, device=x.device)
             % plane_size
         )
-
         convolution_output_batched = output_plane[:, output_indices]
-
-        # Reshape back to B H Cout output_length
-        out = convolution_output_batched.reshape(B, H, C, output_length)
-
-        return out
+        return convolution_output_batched.reshape(B, H, C, output_length)
 
     def conv_forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # Original JTC implementation with variable length support
@@ -458,12 +439,27 @@ class FTconvlayer(_ConvNd):
         weight_p: torch.Tensor,
         weight_n: torch.Tensor,
     ) -> torch.Tensor:
+        # Resolve the (lazily constructed) JTC eagerly so the compiled region
+        # below traces pure tensor work.
+        jtc = self._pic_conv(x.device)
+        return self._batched_signed(jtc, x, weight_p, weight_n)
+
+    def _conv_forward_jtc_batched_signed_impl(
+        self,
+        jtc: JTC,
+        x: torch.Tensor,
+        weight_p: torch.Tensor,
+        weight_n: torch.Tensor,
+    ) -> torch.Tensor:
         x_shape = x.shape
         w = x.shape[2]
         x = x.permute(0, 3, 1, 2)
 
         patch_size = self.config.input_length
-        n_patch = int(x.shape[3] / patch_size)
+        # Integer floordiv keeps the symbolic-shape guards simple under
+        # torch.compile; float-divide-then-int generates unsound guard
+        # expressions that force extra recompiles.
+        n_patch = x.shape[3] // patch_size
         if n_patch <= 0:
             return torch.zeros(x_shape[0], self.out_channels, w, w, device=x.device)
 
@@ -471,7 +467,7 @@ class FTconvlayer(_ConvNd):
         rows = x.shape[1]
         in_channels = x.shape[2]
         cout = self.cout_per_cin
-        out_len = self._pic_conv(x.device).output_length
+        out_len = jtc.output_length
 
         patches = x[..., : n_patch * patch_size].unfold(
             dimension=-1, size=patch_size, step=patch_size
@@ -492,7 +488,10 @@ class FTconvlayer(_ConvNd):
             .reshape(-1, self.config.kernel_length)
         )
 
-        system_out = self.jtc_emulation_forward_paired(signal_pairs, kernel_pairs)
+        # Call the raw pipeline directly: when this whole method is compiled,
+        # routing through JTC's own (possibly compiled) wrapper would nest
+        # torch.compile regions instead of fusing into one graph.
+        system_out = jtc._paired_shot_pipeline(signal_pairs, kernel_pairs)
         system_out = system_out.reshape(
             batch_size, n_patch, rows, in_channels, 2, cout, out_len
         )
@@ -527,8 +526,12 @@ class FTconvlayer(_ConvNd):
             c_out_end = c_out_start + cout
             system_out_p = system_out[:, :, :, c_in, 0, :, :]
             system_out_n = system_out[:, :, :, c_in, 1, :, :]
-            system_out_p = system_out_p.reshape(batch_size * n_patch, rows, cout, out_len)
-            system_out_n = system_out_n.reshape(batch_size * n_patch, rows, cout, out_len)
+            system_out_p = system_out_p.reshape(
+                batch_size * n_patch, rows, cout, out_len
+            )
+            system_out_n = system_out_n.reshape(
+                batch_size * n_patch, rows, cout, out_len
+            )
             self._accumulate_batched_patch_output(
                 output_p,
                 system_out_p,

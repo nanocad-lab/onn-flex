@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from jtc_cycle_planner import compute_contamination_profile
+from onn_shotplan import compute_contamination_profile
 
 
 def _mask(field: int, start: int, stop: int) -> np.ndarray:

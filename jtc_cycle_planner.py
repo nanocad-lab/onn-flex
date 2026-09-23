@@ -4,80 +4,11 @@ import math
 import sys
 from collections.abc import Iterable, Sequence
 
+import onn_shotplan
+
 HEIGHT = 32
 WIDTH = 32
 KERNEL_HEIGHT = 3
-
-
-def compute_contamination_profile(
-    input_len: int, kernel_len: int, lens_size: int, sep: int
-) -> tuple[int, int, int]:
-    """Compute contamination profile for JTC configuration.
-
-    Physics: JTC output contains autocorrelation terms plus two mirrored
-    cross-correlation lobes. A valid output is clean only if the extracted lag
-    is in the desired cross-correlation support and is not overlapped by either
-    autocorrelation or the mirrored cross-correlation support.
-
-    Returns:
-        total_outputs: Total M+N-1 correlation outputs
-        clean_valid_outputs: Number of clean valid convolution outputs (subset of M-N+1)
-        effective_stride: Contiguous clean prefix usable for tile stitching
-    """
-    M, N = input_len, kernel_len
-
-    if M <= 0 or N <= 0 or lens_size <= 0:
-        return 0, 0, 0
-    if M < N:
-        return 0, 0, 0
-    if sep < 0:
-        return 0, 0, 0
-    if M + N + sep > lens_size:
-        return 0, 0, 0
-
-    total_outputs = M + N - 1
-
-    def lag_range(start: int, stop: int) -> set[int]:
-        width = stop - start
-        if width <= 0:
-            return set()
-        if width >= lens_size:
-            return set(range(lens_size))
-        return {lag % lens_size for lag in range(start, stop)}
-
-    # Autocorrelation support is centered at zero lag before fftshift. We work
-    # in lag coordinates modulo L, so zero lag is 0 rather than L//2.
-    autocorr = lag_range(-(M - 1), M) | lag_range(-(N - 1), N)
-
-    # The signal starts D samples after the kernel start in the input plane.
-    # Desired cross support is signal-position minus kernel-position. The JTC
-    # also produces the mirrored lobe at the negative of those lags.
-    d = N + sep
-    desired_cross = lag_range(d - (N - 1), d + M)
-    mirrored_cross = lag_range(-(d + M - 1), -(d - (N - 1)) + 1)
-
-    clean_flags: list[bool] = []
-    valid_start = 0 if N == 1 else (N + 1) // 2
-    valid_end = valid_start + (M - N + 1)
-    same_length_shift = 1 if N == 1 else 0
-    for i in range(valid_start, valid_end):
-        # This matches JTC._build_correlation_start() with the fftshift center
-        # removed: physical_index = L//2 + sep + N//2 + i.
-        lag = (sep + N // 2 + same_length_shift + i) % lens_size
-        clean_flags.append(
-            lag in desired_cross
-            and lag not in autocorr
-            and lag not in mirrored_cross
-        )
-
-    clean_valid_count = sum(clean_flags)
-    effective_stride = 0
-    for is_clean in clean_flags:
-        if not is_clean:
-            break
-        effective_stride += 1
-
-    return total_outputs, clean_valid_count, effective_stride
 
 
 def usable_outputs(input_len: int, kernel_len: int, lens_size: int, sep: int) -> int:
@@ -133,7 +64,7 @@ def cycles_for_config(
         (passes_per_width, total_cycles, effective_stride, total_outputs)
         or None if configuration is invalid
     """
-    total_outputs, _, effective_stride = compute_contamination_profile(
+    total_outputs, _, effective_stride = onn_shotplan.compute_contamination_profile(
         input_len, kernel_len, lens_size, sep
     )
 

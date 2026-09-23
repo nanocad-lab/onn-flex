@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import os
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from plot_style import (
-    apply_global_plot_style,
-    DEFAULT_TITLE_FONTSIZE,
-    SHOW_TITLES,
-)
 import torch
 
+from onn_component import (
+    JTC,
+    _compute_linear_coeffs,
+    _sqrt_clamped,
+    get_coeffs,
+    get_ideal_degree,
+)
 from onn_config import AppConfig
-from onn_component import get_ideal_degree, get_coeffs, JTC
+from plot_style import (
+    DEFAULT_TITLE_FONTSIZE,
+    SHOW_TITLES,
+    apply_global_plot_style,
+)
 
 # Apply shared Matplotlib style (labels/ticks/titles)
 apply_global_plot_style()
@@ -28,6 +34,7 @@ def _plot_fit(
     poly_order: int,
     title: str,
     save_path: str,
+    ylabel: str = "Output",
 ) -> None:
     """Plot raw CSV data against a reference polynomial fit and the higher-order distortion fit.
 
@@ -56,7 +63,7 @@ def _plot_fit(
         label=f"Poly fit (deg {poly_order}, R²={r_squared:.5f})",
     )
     plt.xlabel("Input")
-    plt.ylabel("Output")
+    plt.ylabel(ylabel)
     if SHOW_TITLES:
         plt.title(title, fontsize=DEFAULT_TITLE_FONTSIZE)
     plt.legend()
@@ -67,10 +74,11 @@ def _plot_fit(
 
 def _sweep_and_plot(
     csv_path: str,
-    degree: int,
+    degree: int | None,
     output_dir: str,
     tag: str,
-    ref_degree: int = 1,
+    *,
+    linearization: str,
 ) -> None:
     """Load a CSV I/O sweep, fit polynomials, and save a comparison plot.
 
@@ -79,7 +87,7 @@ def _sweep_and_plot(
         degree: Order of the main polynomial used to model distortion.
         output_dir: Where to write the PNG plot.
         tag: Descriptive tag inserted into the file name and plot title.
-        ref_degree: Order of the reference polynomial (defaults to 1 → linear; ignored for mrm_phase).
+        linearization: Ideal reference used by the simulated component.
     """
     if not os.path.exists(csv_path):
         print(f"[WARNING] CSV file not found: {csv_path}. Skipping {tag} plot.")
@@ -87,19 +95,26 @@ def _sweep_and_plot(
 
     data = pd.read_csv(csv_path)
     x = data["input"].values
+    transform = _sqrt_clamped if tag == "mrm_amplitude" else None
     y = data["output"].values
+    if transform is not None:
+        y = transform(y)
 
-    # Reference behaviour (linear fit unless overridden per component)
+    # Use the same ideal reference and output units as the component model.
     if tag == "mrm_phase":
         y_ref = np.zeros_like(x)
         ref_label = "Ideal (0.0)"
     else:
-        ref_coeff = np.polyfit(x, y, ref_degree)
+        ref_coeff = _compute_linear_coeffs(
+            csv_path, output_transform=transform, linearization=linearization
+        )
         y_ref = np.polyval(ref_coeff, x)
-        ref_label = f"Ideal (deg {ref_degree})"
+        ref_label = f"Ideal ({linearization})"
 
     # Distortion polynomial fit
-    poly_coeff = get_coeffs(csv_path, degree)
+    if degree is None:
+        degree = get_ideal_degree(csv_path, output_transform=transform)
+    poly_coeff = get_coeffs(csv_path, degree, output_transform=transform)
     y_poly = np.polyval(poly_coeff, x)
 
     # Save as PDF rather than PNG
@@ -113,6 +128,7 @@ def _sweep_and_plot(
         degree,
         f"{tag} distortion fit",
         plot_path,
+        ylabel="Field amplitude (√W)" if transform else "Output",
     )
     print(f"[TEST] Saved plot {plot_path}")
 
@@ -142,9 +158,9 @@ def _stage_plots_detailed(config: AppConfig, output_dir: str) -> None:
 
     Uses `JTC.compute_stage_tensors` to retrieve the following stages (when available):
     input_plane, input_plane_quant, input_plane_driver, input_plane_mrm_phase,
-    input_plane_mrm_pwr, jps_raw, jps_pd, jps_tia, jps_scale, jps_quant,
-    jps_driver, jps_mrm_phase, jps_mrm_pwr, output_raw, output_pd, output_tia, output_scale,
-    output_quant, output_slice.
+    input_plane_mrm_amp, jps_raw, jps_pd_input, jps_pd, jps_tia, jps_scale, jps_quant,
+    jps_driver, jps_mrm_phase, jps_mrm_amp, output_raw, output_pd, output_tia, output_scale,
+    output_scale_slice, output_quant, output_quant_slice, output_slice.
     """
     jtc = JTC(config)
 
@@ -198,50 +214,30 @@ def run_pretrain_tests(config: AppConfig) -> None:
     """Generate plots + basic checks before starting (or instead of) training."""
     os.makedirs(config.output_dir, exist_ok=True)
 
-    # Driver
-    if config.driver_distortion_data_path and os.path.exists(
-        config.driver_distortion_data_path
-    ):
-        deg = config.driver_distortion_polyfit_order or get_ideal_degree(
-            config.driver_distortion_data_path
-        )
-        _sweep_and_plot(
-            config.driver_distortion_data_path, deg, config.output_dir, "driver"
-        )
-
-    # PD
-    if config.pd_distortion_data_path and os.path.exists(
-        config.pd_distortion_data_path
-    ):
-        deg = config.pd_distortion_polyfit_order or get_ideal_degree(
-            config.pd_distortion_data_path
-        )
-        _sweep_and_plot(
-            config.pd_distortion_data_path, deg, config.output_dir, "pd", ref_degree=2
-        )
-
-    # TIA
-    if config.tia_distortion_data_path and os.path.exists(
-        config.tia_distortion_data_path
-    ):
-        deg = config.tia_distortion_polyfit_order or get_ideal_degree(
-            config.tia_distortion_data_path
-        )
-        _sweep_and_plot(config.tia_distortion_data_path, deg, config.output_dir, "tia")
-
-    # MRM power
-    if config.mrm_power_data_path and os.path.exists(config.mrm_power_data_path):
-        deg = config.mrm_power_polyfit_order or get_ideal_degree(
-            config.mrm_power_data_path
-        )
-        _sweep_and_plot(config.mrm_power_data_path, deg, config.output_dir, "mrm_power")
-
-    # MRM phase
-    if config.mrm_phase_data_path and os.path.exists(config.mrm_phase_data_path):
-        deg = config.mrm_phase_polyfit_order or get_ideal_degree(
-            config.mrm_phase_data_path
-        )
-        _sweep_and_plot(config.mrm_phase_data_path, deg, config.output_dir, "mrm_phase")
+    components = (
+        (
+            "driver",
+            config.driver_distortion_data_path,
+            config.driver_distortion_polyfit_order,
+        ),
+        ("pd", config.pd_distortion_data_path, config.pd_distortion_polyfit_order),
+        ("tia", config.tia_distortion_data_path, config.tia_distortion_polyfit_order),
+        (
+            "mrm_amplitude",
+            config.mrm_amplitude_data_path,
+            config.mrm_amplitude_polyfit_order,
+        ),
+        ("mrm_phase", config.mrm_phase_data_path, config.mrm_phase_polyfit_order),
+    )
+    for tag, csv_path, degree in components:
+        if csv_path:
+            _sweep_and_plot(
+                csv_path,
+                degree,
+                config.output_dir,
+                tag,
+                linearization=config.transfer_linearization,
+            )
 
     try:
         _range_check_jtc(config, config.output_dir)

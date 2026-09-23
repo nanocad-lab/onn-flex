@@ -1,5 +1,7 @@
 adc_bits: 6
 scale_output: "none"
+converter_clamp_grad: "pwl"
+transfer_linearization: "endpoint"
 dac_bits: 4
 fourier_plane_bits: 6
 driver_distortion_data_path: ./component_data/driver_sim_data.csv
@@ -13,9 +15,9 @@ jtc_total_field: 16
 mrm_phase_data_path: ./component_data/mrm_phase_sim_data.csv
 mrm_phase_distortion_strength: 1.0
 mrm_phase_polyfit_order: null
-mrm_power_data_path: ./component_data/mrm_pwr_w_sim_data.csv
-mrm_power_distortion_strength: 1.0
-mrm_power_polyfit_order: null
+mrm_amplitude_data_path: ./component_data/mrm_amp_w_sim_data.csv
+mrm_amplitude_distortion_strength: 1.0
+mrm_amplitude_polyfit_order: null
 pd_distortion_data_path: ./component_data/pd_sim_data.csv
 pd_distortion_polyfit_order: null
 pd_distortion_strength: 1.0
@@ -24,17 +26,25 @@ tia_distortion_polyfit_order: null
 tia_distortion_strength: 1.0
 ler_std_dev: 0.01
 laser_rin_db: null
+laser_power_gain: 1.0
 pd_noise_w: 0.0
-pd_input_clamp_min_w: 1.0e-6
+pd_input_clamp_min_w: null
 pd_input_clamp_max_w: 1.0e-5
+pd_input_clamp_mode: soft
+pd_input_soft_clamp_width_w: 1.0e-6
+pd_range_regularization_weight: 0.0
+pd_range_regularization_min_w: null
+pd_range_regularization_max_w: null
 lens_distortion_strength: 0.0
 lens_legendre_order: 2
 lens_coefs: [-2.772300, -1.266519]
 conv_backend: jtc_emulation
 num_identical_layers: 1
+fftconvnet_input_gain: 1.0
 num_epochs: 20
 learning_rate: 0.001
 batch_size: 128
+seed: null
 eval_only: False
 pretrained_weights: ""
 run_pretrain_tests: True
