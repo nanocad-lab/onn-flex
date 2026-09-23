@@ -10,12 +10,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
-from onn_config import AppConfig
+
 from onn_component import JTC
-from jtc_cycle_planner import compute_contamination_profile
+from onn_config import AppConfig
+from onn_shotplan import compute_contamination_profile
 
 
 def pytorch_conv2d_reference(image: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:

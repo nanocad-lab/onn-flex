@@ -1,0 +1,22 @@
+# Analog Fourier-plane baseline for mapping and fidelity studies.
+# This is a simulation configuration, not a characterized accelerator design.
+model_arch: resnet11
+conv_backend: jtc_analog_fourier
+jtc_shot_mapping: row
+jtc_rowwise_geometry: config
+jtc_total_field: 48
+jtc_separation: 8
+jtc_fourier_closed_form: false
+jtc_fourier_lag_gemm: true
+jtc_remodulation: {}
+jtc_assume_nonnegative_input: false
+fourier_plane_bits: null
+pd_input_clamp_min_w: null
+pd_input_clamp_max_w: null
+scale_output: none
+dac_bits: 4
+adc_bits: 8
+jtc_output_gain_mode: calibrate_freeze
+jtc_gain_headroom: 2.0
+compile_jtc: false
+run_pretrain_tests: false

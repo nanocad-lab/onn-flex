@@ -19,7 +19,7 @@ Notes:
 import argparse
 import os
 import sys
-from dataclasses import replace, asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 # Ensure repository root is importable when run directly
@@ -32,12 +32,11 @@ from onn_config import AppConfig, load_app_config_from_yaml
 from onn_inference import run_inference
 from onn_train import train_onn_model
 
-
 DISTORTION_STRENGTH_KEYS: list[str] = [
     "driver_distortion_strength",
     "pd_distortion_strength",
     "tia_distortion_strength",
-    "mrm_power_distortion_strength",
+    "mrm_amplitude_distortion_strength",
     "mrm_phase_distortion_strength",
     "lens_distortion_strength",
 ]
@@ -213,7 +212,7 @@ def run_one_hot_sweeps(
             driver_distortion_strength=0.0,
             pd_distortion_strength=0.0,
             tia_distortion_strength=0.0,
-            mrm_power_distortion_strength=0.0,
+            mrm_amplitude_distortion_strength=0.0,
             mrm_phase_distortion_strength=0.0,
             lens_distortion_strength=0.0,
             dac_bits=dac_b,

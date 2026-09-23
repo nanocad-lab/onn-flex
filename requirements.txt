@@ -1,0 +1,13 @@
+# Tested scientific environment: Python 3.12, PyTorch 2.9.1.
+# Install the appropriate PyTorch CPU/CUDA wheel first; see README.md.
+torch==2.9.1
+torchvision==0.24.1
+numpy==1.26.4
+scipy==1.16.3
+pandas==2.3.3
+scikit-learn==1.7.2
+matplotlib==3.10.7
+seaborn==0.13.2
+PyYAML==6.0.3
+tqdm==4.67.1
+Pillow==12.0.0

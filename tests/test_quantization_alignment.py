@@ -14,12 +14,13 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import torch
 import pytest
+import torch
+
+from onn_component import JTC
 from onn_config import AppConfig
 from onn_layers import FTconvlayer
-from onn_component import JTC
-from onn_quantization import quantize_ste
+from onn_quantization import converter_quantize_ste, quantize_ste
 
 
 class TestQuantizationAlignment:
@@ -54,6 +55,14 @@ class TestQuantizationAlignment:
 
         assert torch.equal(x, x_quantized)
 
+    def test_converter_quantize_none_bits_still_saturates(self):
+        """Converter full-scale rails apply even when quantization noise is off."""
+        x = torch.tensor([-0.25, 0.0, 0.4, 1.0, 1.25])
+        y = converter_quantize_ste(x, None)
+
+        expected = torch.tensor([0.0, 0.0, 0.4, 1.0, 1.0])
+        torch.testing.assert_close(y, expected, rtol=0, atol=0)
+
     def test_quantize_ste_with_bits(self):
         """Test that shared STE quantization runs when bits is provided."""
         x = torch.randn(10, 10)
@@ -72,6 +81,59 @@ class TestQuantizationAlignment:
         for val in x_quantized.flatten().unique():
             distances = torch.abs(expected_values - val)
             assert distances.min() < 1e-6
+
+    def test_quantize_ste_gradient_respects_clamp(self):
+        """STE bypasses rounding, but not converter saturation."""
+        x = torch.tensor(
+            [-0.25, 0.0, 0.2, 0.8, 1.0, 1.25],
+            requires_grad=True,
+        )
+
+        quantize_ste(x, 4).sum().backward()
+
+        expected_grad = torch.tensor([0.0, 1.0, 1.0, 1.0, 1.0, 0.0])
+        torch.testing.assert_close(x.grad, expected_grad, rtol=0, atol=0)
+
+    def test_converter_saturation_gradient_is_not_ste(self):
+        x = torch.tensor(
+            [-0.25, 0.0, 0.2, 0.8, 1.0, 1.25],
+            requires_grad=True,
+        )
+
+        converter_quantize_ste(x, None).sum().backward()
+
+        expected_grad = torch.tensor([0.0, 1.0, 1.0, 1.0, 1.0, 0.0])
+        torch.testing.assert_close(x.grad, expected_grad, rtol=0, atol=0)
+
+    def test_converter_mad_gradient_decays_outside_rails(self):
+        x = torch.tensor(
+            [-1.5, -0.5, 0.0, 0.2, 0.8, 1.0, 1.5, 2.5],
+            requires_grad=True,
+        )
+
+        converter_quantize_ste(x, None, clamp_grad="mad").sum().backward()
+
+        expected_grad = torch.tensor(
+            [
+                0.25,  # 0.5 / abs(-1.5 - 0.5)
+                0.5,  # 0.5 / abs(-0.5 - 0.5)
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                0.5,  # 0.5 / abs(1.5 - 0.5)
+                0.25,  # 0.5 / abs(2.5 - 0.5)
+            ]
+        )
+        torch.testing.assert_close(x.grad, expected_grad, rtol=0, atol=0)
+
+    def test_quantize_ste_rejects_invalid_bits(self):
+        x = torch.rand(4)
+
+        with pytest.raises(ValueError, match="bits"):
+            quantize_ste(x, 0)
+        with pytest.raises(ValueError, match="bits"):
+            quantize_ste(x, -1)
 
     def test_layer_quantization_none_bits(self, base_config, test_input):
         """Test that layer quantization handles None bits correctly."""
@@ -201,9 +263,7 @@ class TestQuantizationAlignment:
         signal = torch.rand(1, 8, requires_grad=True)
 
         # Apply Fourier plane quantization
-        signal_quantized = quantize_ste(
-            signal, base_config.fourier_plane_bits
-        )
+        signal_quantized = quantize_ste(signal, base_config.fourier_plane_bits)
 
         # Compute loss
         loss = signal_quantized.sum()

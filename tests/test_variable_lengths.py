@@ -10,12 +10,13 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
-from onn_config import AppConfig
-from onn_component import JTC
+
 from jtc_cycle_planner import usable_outputs
+from onn_component import JTC
+from onn_config import AppConfig
 from onn_layers import FTconvlayer
 
 

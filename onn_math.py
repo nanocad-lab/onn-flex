@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 
@@ -9,11 +11,25 @@ def complex_abs_squared(x: torch.Tensor) -> torch.Tensor:
     return (parts * parts).sum(dim=-1)
 
 
+class _SqrtNonnegativeFiniteGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor) -> torch.Tensor:
+        output = torch.sqrt(input.clamp_min(0.0))
+        ctx.save_for_backward(output)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        (output,) = ctx.saved_tensors
+        eps = max(torch.finfo(output.dtype).tiny, 1e-12)
+        sqrt_eps = math.sqrt(eps)
+        active = output >= sqrt_eps
+        grad = grad_output / (2.0 * output.clamp_min(sqrt_eps))
+        return torch.where(active, grad, torch.zeros_like(grad))
+
+
 def sqrt_nonnegative_with_finite_grad(x: torch.Tensor) -> torch.Tensor:
     """Return exact sqrt(max(x, 0)) with a finite surrogate gradient at zero."""
-    exact = torch.sqrt(x.clamp_min(0.0))
     if not x.requires_grad:
-        return exact
-    eps = max(torch.finfo(x.dtype).tiny, 1e-12)
-    safe = torch.sqrt(x.clamp_min(eps))
-    return exact.detach() + safe - safe.detach()
+        return torch.sqrt(x.clamp_min(0.0))
+    return _SqrtNonnegativeFiniteGrad.apply(x)

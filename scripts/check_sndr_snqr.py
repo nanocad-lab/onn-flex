@@ -24,11 +24,11 @@ if __package__ is None or __package__ == "":
 
 from onn_config import load_app_config_from_yaml
 from onn_inference import (
-    compute_sqndr_enob,
     compute_sndr_vs_quantized_ideal_enob,
     compute_snqr_enob,
     compute_snr_enob,
     compute_snr_jps,
+    compute_sqndr_enob,
 )
 
 
