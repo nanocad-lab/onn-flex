@@ -16,6 +16,10 @@ Fourier-plane loop (PD/TIA -> remodulating MRM) cross that gap:
   second inverted, so the Fourier loop closes laterally on the bottom die
   (organization 3).
 
+The optical design is taken as given: 5 um pixel pitch on both optical planes
+and ~500 um between the emitting and receiving grating couplers. That
+separation is the middle-layer thickness, so it sets the via length.
+
 Every number here is a placeholder for sizing studies. Component energies,
 thermal resistances and via electrical models are textbook first-order forms;
 replace them with PDK, package and measurement data before drawing
@@ -45,18 +49,8 @@ HBM3_GBYTES_S = 819.0  # 1024 bits at 6.4 Gb/s
 
 @dataclass(frozen=True)
 class OpticsParams:
-    wavelength_um: float = 1.31  # 45SPCLO O-band
-    n_gap: float = 1.45  # glass index along the optical path
+    pixel_pitch_um: float = 5.0  # GC pitch on both optical planes (given)
     gc_size_um: float = 5.0  # mini grating coupler
-    gc_gap_um: float = 2.0  # GC-to-GC spacing on the dense axis (fan-out)
-    wg_pitch_um: float = 2.0  # routed waveguide pitch between GC rows
-    wg_layers: int = 1
-    feed_sides: int = 2
-    pixel_pitch_um: float = 15.0  # in-pixel ring/PD + GC cell
-    # f_eff / physical gap: 1 = single metalens; >1 needs folding, a
-    # telephoto doublet or a spaceplate.
-    compression: float = 1.0
-    gap_min_um: float = 100.0
 
 
 @dataclass(frozen=True)
@@ -156,9 +150,7 @@ class StackParams:
     n: int = 100  # 2D field per dimension: n x n channels
     kernel: int = 3
     f_mod_hz: float = 1e9
-    pixel_mode: str = "in_pixel"  # "ideal", "in_pixel" or "fanout"
-    gap_um: float | None = None  # None: set by optics (f_eff / compression)
-    gap_max_um: float = 3000.0  # practical stack-height limit
+    gap_um: float = 500.0  # GC-to-GC separation = middle-layer thickness (given)
     via_area_budget_mm2: float = 200.0
     tdm_policy: str = "min_area"  # or "min_power" (1:1 lanes when they fit)
     footprint_max_mm2: float = 400.0  # thermal spreading limit
@@ -236,48 +228,13 @@ ARCHITECTURES = {
 
 
 # --------------------------------------------------------------------------
-# Optics: the Fourier-plane sampling sets the focal length
+# Optics (given)
 # --------------------------------------------------------------------------
 
 
-def pixel_pitches_um(n: int, optics: OpticsParams, mode: str) -> tuple[float, float]:
-    """Return (dense, sparse) pitch of one emitter or detector array."""
-    if mode == "ideal":
-        return optics.gc_size_um, optics.gc_size_um
-    if mode == "in_pixel":
-        return optics.pixel_pitch_um, optics.pixel_pitch_um
-    if mode == "fanout":
-        dense = optics.gc_size_um + optics.gc_gap_um
-        lanes = math.ceil(n / (optics.feed_sides * optics.wg_layers))
-        return dense, optics.gc_size_um + lanes * optics.wg_pitch_um
-    raise ValueError(f"unknown pixel mode {mode!r}")
-
-
-def pitch_product_um2(n: int, optics: OpticsParams, mode: str) -> float:
-    """Per-axis p_in * p_F. Fan-out Fourier arrays are rotated 90 degrees."""
-    dense, sparse = pixel_pitches_um(n, optics, mode)
-    return dense * sparse
-
-
-def required_focal_length_um(n: int, optics: OpticsParams, mode: str) -> float:
-    """DFT-matched Fourier sampling: p_in * p_F = (lambda / n_gap) f / N."""
-    return optics.n_gap * n * pitch_product_um2(n, optics, mode) / optics.wavelength_um
-
-
-def max_n_for_gap(gap_um: float, optics: OpticsParams, mode: str) -> int:
-    """Largest field N whose f_eff fits gap * compression."""
-    best = 0
-    for n in range(1, 2049):
-        if required_focal_length_um(n, optics, mode) <= gap_um * optics.compression:
-            best = n
-        elif mode != "fanout":
-            break
-    return best
-
-
-def fourier_fill_factor(n: int, optics: OpticsParams, mode: str) -> float:
-    """Fraction of Fourier-plane power a GC-sized receiver captures."""
-    return min(1.0, optics.gc_size_um**2 / pitch_product_um2(n, optics, mode))
+def fourier_fill_factor(optics: OpticsParams) -> float:
+    """Fraction of each pixel a GC-sized receiver covers (1 at 5 um / 5 um)."""
+    return min(1.0, (optics.gc_size_um / optics.pixel_pitch_um) ** 2)
 
 
 # --------------------------------------------------------------------------
@@ -591,17 +548,10 @@ def evaluate(arch_key: str, p: StackParams) -> dict:
     # ResNet-18 CIFAR stages carry equal MACs, so time adds harmonically
     workload_ratio = len(ratios) / sum(1.0 / r for r in ratios)
 
-    # optics -> gap
-    f_eff = required_focal_length_um(p.n, op, p.pixel_mode)
-    if p.gap_um is None:
-        gap = max(f_eff / op.compression, op.gap_min_um)
-        optics_ok = gap <= p.gap_max_um
-    else:
-        gap = p.gap_um
-        optics_ok = f_eff <= gap * op.compression
-    dense, sparse = pixel_pitches_um(p.n, op, p.pixel_mode)
-    aperture_mm = p.n * max(dense, sparse) * 1e-3
-    fill = fourier_fill_factor(p.n, op, p.pixel_mode)
+    # optics are given: the GC separation is the gap every via must span
+    gap = p.gap_um
+    aperture_mm = p.n * op.pixel_pitch_um * 1e-3
+    fill = fourier_fill_factor(op)
 
     # traffic per shot
     lm = link_metrics(gap, p.via, ln)
@@ -698,7 +648,6 @@ def evaluate(arch_key: str, p: StackParams) -> dict:
     speedup_workload = workload_ratio * f_shot / p.f_mod_hz
     mem_gbs = bits_per_shot * f_shot / 8e9
     checks = {
-        "optics": optics_ok,
         "rate": f_shot >= f_shot_opt * (1 - 1e-9),
         "thermal": thermal_ok,
         "target": speedup_workload >= p.target_speedup,
@@ -712,13 +661,8 @@ def evaluate(arch_key: str, p: StackParams) -> dict:
         "n": p.n,
         "channels": f2,
         "f_mod_ghz": p.f_mod_hz / 1e9,
-        "pixel_mode": p.pixel_mode,
-        "pitch_dense_um": dense,
-        "pitch_sparse_um": sparse,
-        "compression": op.compression,
-        "f_eff_mm": f_eff / 1e3,
+        "pixel_pitch_um": op.pixel_pitch_um,
         "gap_um": gap,
-        "compression_needed": f_eff / gap,
         "fourier_fill": fill,
         "aperture_mm": aperture_mm,
         "via_kind": p.via.kind,
@@ -764,7 +708,7 @@ def evaluate(arch_key: str, p: StackParams) -> dict:
         "mem_gbytes_s": mem_gbs,
         "mem_devices": memory_devices(mem_gbs, wl),
         **{f"ok_{name}": ok for name, ok in checks.items()},
-        "feasible": checks["optics"] and checks["thermal"] and checks["target"],
+        "feasible": checks["thermal"] and checks["target"],
         "failing": ",".join(name for name, ok in checks.items() if not ok) or "-",
     }
 

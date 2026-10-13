@@ -16,13 +16,14 @@ def test_clean_limits_match_geometry_note():
     assert m.macs_per_shot_2d(100, 3) == (mx - 2) * (my - 2) * 9
 
 
-def test_focal_length_follows_fourier_sampling():
-    optics = m.OpticsParams()
-    f_eff = m.required_focal_length_um(100, optics, "ideal")
-    # p_in * p_F = (lambda / n) f / N
-    assert 5.0 * 5.0 == pytest.approx(optics.wavelength_um / optics.n_gap * f_eff / 100)
-    assert m.max_n_for_gap(500.0, optics, "ideal") == 18
-    assert m.required_focal_length_um(50, optics, "fanout") > f_eff
+def test_stated_optics_set_the_via_geometry():
+    p = m.StackParams()
+    assert (p.gap_um, p.optics.pixel_pitch_um) == (500.0, 5.0)
+    assert m.via_geometry_um(p.gap_um, p.via) == (50.0, 100.0)
+    assert m.fourier_fill_factor(p.optics) == 1.0
+    r = m.evaluate("C", p)
+    assert r["aperture_mm"] == pytest.approx(0.5)
+    assert "ok_optics" not in r
 
 
 def test_tgv_parasitics_are_tem_consistent():
@@ -62,7 +63,6 @@ def test_architecture_traffic_contracts(f_mod):
     assert b["power_vias"] == 0 and a["power_vias"] > 0
     assert c["f_shot_ghz"] == pytest.approx(f_mod / 1e9)
     assert a["f_shot_ghz"] <= f_mod / 2e9 + 1e-12
-    assert not a["ok_optics"]  # 500 um cannot hold a 100 x 100 Fourier plane
     assert c["speedup_workload"] >= 10.0
 
 
@@ -74,7 +74,8 @@ def test_with_overrides_nested():
 
 def test_study_report_builds():
     report, baseline, records = study.build_report()
-    assert "## 6. Design points" in report
+    assert "## 5. Feasible design points" in report
+    assert "f_eff" not in report
     assert len(baseline) == 12
     assert any(r["feasible"] and r["arch"] == "C" and r["n"] == 100 for r in records)
     assert all(math.isfinite(r["f_shot_ghz"]) for r in records)

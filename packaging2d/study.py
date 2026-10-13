@@ -12,25 +12,17 @@ import argparse
 import csv
 import itertools
 import math
-from dataclasses import replace
 from pathlib import Path
 
 from packaging2d import model as m
 
-PIXEL_OPTIONS = {
-    # label: (mode, in-pixel pitch)
-    "ideal-5um": ("ideal", 5.0),
-    "in-pixel-10um": ("in_pixel", 10.0),
-    "in-pixel-15um": ("in_pixel", 15.0),
-    "fan-out": ("fanout", 15.0),
-}
 VIA_OPTIONS = {
     "TGV AR10": {"via__kind": "TGV", "via__aspect_ratio": 10.0},
     "TGV AR20": {"via__kind": "TGV", "via__aspect_ratio": 20.0},
     "TSV AR10": {"via__kind": "TSV", "via__aspect_ratio": 10.0},
     "TSV AR20": {"via__kind": "TSV", "via__aspect_ratio": 20.0},
 }
-COMPRESSIONS = (1.0, 2.0, 4.0, 8.0)
+VIA_BUDGETS = (100.0, 200.0, 400.0)
 N_VALUES = (16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 100, 112, 128)
 F_MOD = (1e9, 1e10)
 
@@ -56,11 +48,8 @@ def _table(header: list[str], rows: list[list]) -> str:
     return "\n".join(lines)
 
 
-def _params(pixel: str, **changes) -> m.StackParams:
-    mode, pitch = PIXEL_OPTIONS[pixel]
-    return m.with_overrides(
-        m.StackParams(), pixel_mode=mode, optics__pixel_pitch_um=pitch, **changes
-    )
+def _params(**changes) -> m.StackParams:
+    return m.with_overrides(m.StackParams(), **changes)
 
 
 # --------------------------------------------------------------------------
@@ -68,80 +57,43 @@ def _params(pixel: str, **changes) -> m.StackParams:
 # --------------------------------------------------------------------------
 
 
-def optics_section() -> str:
-    rows = []
-    for label in PIXEL_OPTIONS:
-        p = _params(label)
-        for n in (32, 50, 100):
-            dense, sparse = m.pixel_pitches_um(n, p.optics, p.pixel_mode)
-            f_eff = m.required_focal_length_um(n, p.optics, p.pixel_mode)
-            rows.append(
-                [
-                    label,
-                    n,
-                    f"{dense:g} x {sparse:g}",
-                    f_eff / 1e3,
-                    f_eff / 500.0,
-                    m.fourier_fill_factor(n, p.optics, p.pixel_mode),
-                ]
-            )
-    nmax = []
-    for label, (mode, _) in PIXEL_OPTIONS.items():
-        optics = _params(label).optics
-        nmax.append(
-            [label]
-            + [
-                m.max_n_for_gap(gap, replace(optics, compression=g), mode)
-                for gap, g in ((500, 1), (500, 4), (1000, 4), (3000, 1), (3000, 4))
-            ]
-        )
+def assumptions_section() -> str:
+    p = m.StackParams()
+    d_um, pitch_um = m.via_geometry_um(p.gap_um, p.via)
     return "\n\n".join(
         [
-            "## 1. Optics sets the gap",
-            "DFT-matched Fourier sampling requires `p_in * p_F = (lambda/n) f / N`"
-            " per axis, so `f_eff = n N p_in p_F / lambda` (lambda = 1.31 um,"
-            " n = 1.45). Compression G = f_eff / physical gap.",
-            _table(
-                [
-                    "pixel option",
-                    "N",
-                    "pitch (um)",
-                    "f_eff (mm)",
-                    "G for 500 um",
-                    "Fourier fill",
-                ],
-                rows,
-            ),
-            "Largest N per dimension that fits a gap at compression G:",
-            _table(
-                [
-                    "pixel option",
-                    "0.5 mm, G=1",
-                    "0.5 mm, G=4",
-                    "1 mm, G=4",
-                    "3 mm, G=1",
-                    "3 mm, G=4",
-                ],
-                nmax,
-            ),
+            "## 1. Assumptions",
+            f"N = {p.n} per side ({p.n * p.n:,} channels), "
+            f"{p.optics.pixel_pitch_um:g} um pixel pitch, "
+            f"{p.gap_um:g} um between emitting and receiving grating couplers. "
+            "The optics are taken as given; the separation is the middle-layer "
+            f"thickness, so every vertical via is {p.gap_um:g} um long "
+            f"({d_um:g} um diameter on {pitch_um:g} um pitch at AR "
+            f"{p.via.aspect_ratio:g}:1). Rates: 1 and 10 GHz modulation. 1D "
+            f"baseline: F = {p.baseline_1d_field}, "
+            f"{m.macs_per_shot_1d(p.baseline_1d_field, p.kernel):g} MAC per shot.",
         ]
     )
 
 
 def via_section() -> str:
     rows = []
-    link = m.LinkParams()
-    for kind, ar, gap in itertools.product(
-        ("TGV", "TSV"), (10.0, 20.0), (500.0, 1000.0, 2000.0, 3000.0)
+    for kind, ar, r_drv in itertools.product(
+        ("TGV", "TSV"), (10.0, 20.0), (50.0, 100.0)
     ):
-        lm = m.link_metrics(gap, m.ViaTech(kind=kind, aspect_ratio=ar), link)
+        lm = m.link_metrics(
+            500.0,
+            m.ViaTech(kind=kind, aspect_ratio=ar),
+            m.LinkParams(r_drv_ohm=r_drv),
+        )
         rows.append(
             [
                 kind,
                 ar,
-                gap / 1e3,
+                r_drv,
                 f"{lm['diameter_um']:g}/{lm['pitch_um']:g}",
                 lm["c_via_ff"],
+                lm["l_nh"],
                 lm["f3db_ghz"],
                 lm["analog_gsps"],
                 lm["nrz_gbps"],
@@ -153,20 +105,21 @@ def via_section() -> str:
         )
     return "\n\n".join(
         [
-            "## 2. TSV/TGV lane bandwidth",
-            "Series R_drv (50 ohm) + via R/L into via C + pads + load; f3dB is the"
-            " second-order -3 dB point. Analog rate = 6-bit settling in half a"
-            " sample; NRZ = 2 x f3dB. TSV liner = 2% of diameter (1 um at 50 um)"
-            " with 0.7 depletion factor; TGV in glass (er 4.8) with G-S-G returns."
-            " Pass columns compare against the A/B Fourier-loop sample rate per"
-            " lane at 1 GHz (0.5 GS/s) and 10 GHz (5 GS/s) modulation.",
+            "## 2. TSV/TGV lane bandwidth (500 um gap)",
+            "Series driver resistance + via R/L into via C + 2 x 20 fF pads + 20 fF"
+            " load; f3dB is the second-order -3 dB point. Analog rate = 6-bit"
+            " settling in half a sample; NRZ = 2 x f3dB. TSV liner = 2% of the"
+            " diameter with a 0.7 depletion factor; TGV in glass (er 4.8) with"
+            " G-S-G returns. The ok columns compare against the A/B Fourier-loop"
+            " rate per lane: 0.5 GS/s at 1 GHz and 5 GS/s at 10 GHz modulation.",
             _table(
                 [
                     "via",
                     "AR",
-                    "gap (mm)",
+                    "R_drv",
                     "d/pitch (um)",
                     "C (fF)",
+                    "L (nH)",
                     "f3dB (GHz)",
                     "analog GS/s",
                     "NRZ Gb/s",
@@ -181,48 +134,65 @@ def via_section() -> str:
     )
 
 
-def crossing_section(n: int = 100) -> str:
-    """Ways to carry the A/B Fourier loop (n^2 samples per pass) across the gap."""
+def crossing_options(n: int, f_mod: float, via: m.ViaTech) -> list[dict]:
+    """Ways to carry the A/B Fourier loop (n^2 samples per shot) across the gap."""
     link, pw = m.LinkParams(), m.PowerParams()
+    lm = m.link_metrics(500.0, via, link)
+    f_shot = f_mod / 2
+    rate = n * n * f_shot
+    lane_area = lm["lane_area_um2"] * 1e-6
+    tdm = int(min(lm["analog_gsps"], link.tdm_max_gsps) * 1e9 // f_shot)
+    tdm = min(tdm, link.tdm_max)
     e_digital = (
         pw.adc_fom_fj * 2 ** (link.analog_bits - 1) * 1e-3
         + pw.dac_pj
         + link.analog_bits * pw.serdes_pj_per_bit
     )
+    options = [
+        (
+            "analog 1:1",
+            n * n if lm["analog_gsps"] * 1e9 >= f_shot else None,
+            lm["energy_pj_per_sample"],
+        ),
+        (
+            f"analog TDM x{tdm}" if tdm >= 2 else "analog TDM",
+            math.ceil(n * n / tdm) if tdm >= 2 else None,
+            lm["energy_pj_per_sample"] + link.tdm_pj_per_sample,
+        ),
+        (
+            "digital ADC-SerDes-DAC",
+            math.ceil(rate * link.analog_bits / (lm["nrz_gbps"] * 1e9)),
+            e_digital,
+        ),
+    ]
+    return [
+        {
+            "option": name,
+            "lanes": lanes,
+            "area_mm2": None if lanes is None else lanes * lane_area,
+            "power_w": None if lanes is None else rate * e_pj * 1e-12,
+        }
+        for name, lanes, e_pj in options
+    ]
+
+
+def crossing_section(n: int = 100) -> str:
     rows = []
     for f_mod in F_MOD:
-        f_shot = f_mod / 2
-        rate = n * n * f_shot
-        for kind, gap in (("TGV", 500.0), ("TSV", 500.0), ("TGV", 1000.0)):
-            via = m.ViaTech(kind=kind)
-            lm = m.link_metrics(gap, via, link)
-            lane_area = lm["lane_area_um2"] * 1e-6
-            direct_ok = lm["analog_gsps"] * 1e9 >= f_shot
-            tdm = int(min(lm["analog_gsps"], link.tdm_max_gsps) * 1e9 // f_shot)
-            tdm = min(tdm, link.tdm_max)
-            digital_lanes = math.ceil(rate * link.analog_bits / (lm["nrz_gbps"] * 1e9))
-            options = [
-                (
-                    "analog 1:1",
-                    n * n if direct_ok else None,
-                    lm["energy_pj_per_sample"],
-                ),
-                (
-                    f"analog TDM x{tdm}" if tdm >= 2 else "analog TDM",
-                    math.ceil(n * n / tdm) if tdm >= 2 else None,
-                    lm["energy_pj_per_sample"] + link.tdm_pj_per_sample,
-                ),
-                ("digital ADC-SerDes-DAC", digital_lanes, e_digital),
-            ]
-            for name, lanes, e_pj in options:
+        for label in ("TGV AR10", "TGV AR20", "TSV AR10"):
+            via = m.ViaTech(
+                kind=VIA_OPTIONS[label]["via__kind"],
+                aspect_ratio=VIA_OPTIONS[label]["via__aspect_ratio"],
+            )
+            for opt in crossing_options(n, f_mod, via):
                 rows.append(
                     [
                         f_mod / 1e9,
-                        f"{kind} {gap / 1e3:g} mm",
-                        name,
-                        "rate-limited" if lanes is None else lanes,
-                        "-" if lanes is None else lanes * lane_area,
-                        "-" if lanes is None else rate * e_pj * 1e-12,
+                        label,
+                        opt["option"],
+                        "rate-limited" if opt["lanes"] is None else opt["lanes"],
+                        "-" if opt["area_mm2"] is None else opt["area_mm2"],
+                        "-" if opt["power_w"] is None else opt["power_w"],
                     ]
                 )
     return "\n\n".join(
@@ -242,8 +212,6 @@ def crossing_section(n: int = 100) -> str:
 
 
 ARCH_KEYS = [
-    "gap_um",
-    "compression_needed",
     "f_shot_ghz",
     "limiter",
     "speedup_workload",
@@ -274,20 +242,19 @@ ARCH_KEYS = [
 
 
 def baseline_section() -> tuple[str, list[dict]]:
-    """Architectures at the stated assumptions: 500 um gap, 50/100 um TGV."""
+    """Architectures at the stated assumptions: 500 um gap, 50/100 um vias."""
     records = []
     for f_mod, kind in itertools.product(F_MOD, ("TGV", "TSV")):
         for key in m.ARCHITECTURES:
-            p = _params("ideal-5um", gap_um=500.0, f_mod_hz=f_mod, via__kind=kind)
-            records.append(m.evaluate(key, p))
+            records.append(m.evaluate(key, _params(f_mod_hz=f_mod, via__kind=kind)))
     sections = ["## 4. Architectures at the stated assumptions"]
     sections.append(
-        "N = 100, 500 um gap, AR 10 (50 um vias on 100 um pitch), 5 um GC pitch"
-        " (best-case optics; still needs 5.5x compression). Thermal footprint ="
-        " smallest stack area that keeps photonic dies <= 85 C and the EIC <="
-        " 105 C (cap 400 mm2). Speedup = MACs/s vs the 1D F=256 JTC at the same"
-        " modulation rate over CIFAR ResNet-18 stages (equal MACs per stage, so"
-        " a harmonic mean); speedup_worst_layer is the 4x4-map stage alone."
+        "N = 100, 5 um pitch, 500 um gap, AR 10 (50 um vias on 100 um pitch),"
+        " 200 mm2 gap-via budget. Thermal footprint = smallest stack area that"
+        " keeps photonic dies <= 85 C and the EIC <= 105 C (cap 400 mm2)."
+        " Speedup = MACs/s vs the 1D F=256 JTC at the same modulation rate over"
+        " CIFAR ResNet-18 stages (equal MACs per stage, so a harmonic mean);"
+        " speedup_worst_layer is the 4x4-map stage alone."
     )
     for f_mod, kind in itertools.product(F_MOD, ("TGV", "TSV")):
         subset = [
@@ -305,70 +272,41 @@ def baseline_section() -> tuple[str, list[dict]]:
 
 def sweep() -> list[dict]:
     records = []
-    for pixel, via_label, g, n, f_mod in itertools.product(
-        PIXEL_OPTIONS, VIA_OPTIONS, COMPRESSIONS, N_VALUES, F_MOD
+    for via_label, budget, n, f_mod in itertools.product(
+        VIA_OPTIONS, VIA_BUDGETS, N_VALUES, F_MOD
     ):
         p = _params(
-            pixel, n=n, f_mod_hz=f_mod, optics__compression=g, **VIA_OPTIONS[via_label]
+            n=n, f_mod_hz=f_mod, via_area_budget_mm2=budget, **VIA_OPTIONS[via_label]
         )
         for key in m.ARCHITECTURES:
             r = m.evaluate(key, p)
-            r["pixel_option"] = pixel
             r["via_option"] = via_label
+            r["via_budget_mm2"] = budget
             records.append(r)
     return records
 
 
 def feasibility_section(records: list[dict]) -> str:
-    """Largest feasible N per arch / rate / pixel / compression (best via)."""
-    header = ["pixel option", "G"] + [
+    """Largest feasible N per via option and budget, plus N = 100 design points."""
+    header = ["via", "budget (mm2)"] + [
         f"{a} @ {f / 1e9:g} GHz" for a in m.ARCHITECTURES for f in F_MOD
     ]
     rows = []
-    for pixel, g in itertools.product(PIXEL_OPTIONS, COMPRESSIONS):
-        row = [pixel, g]
+    for via_label, budget in itertools.product(VIA_OPTIONS, VIA_BUDGETS):
+        row = [via_label, budget]
         for a, f in itertools.product(m.ARCHITECTURES, F_MOD):
             ok = [
-                r
+                r["n"]
                 for r in records
-                if r["pixel_option"] == pixel
-                and r["compression"] == g
+                if r["via_option"] == via_label
+                and r["via_budget_mm2"] == budget
                 and r["arch"] == a
                 and r["f_mod_ghz"] == f / 1e9
                 and r["feasible"]
+                and r["ok_rate"]
             ]
-            row.append(max(r["n"] for r in ok) if ok else "-")
+            row.append(max(ok) if ok else "-")
         rows.append(row)
-
-    best_rows = []
-    for a, f in itertools.product(m.ARCHITECTURES, F_MOD):
-        ok = [
-            r
-            for r in records
-            if r["arch"] == a and r["f_mod_ghz"] == f / 1e9 and r["feasible"]
-        ]
-        ok.sort(
-            key=lambda r: (-r["tmacs"], r["compression"], r["footprint_thermal_mm2"])
-        )
-        for r in ok[:2]:
-            best_rows.append(
-                [
-                    a,
-                    f / 1e9,
-                    r["n"],
-                    r["pixel_option"],
-                    r["compression"],
-                    r["via_option"],
-                    r["gap_um"],
-                    r["speedup_workload"],
-                    r["tmacs"],
-                    r["p_stack_w"],
-                    r["footprint_thermal_mm2"],
-                    r["mem_devices"],
-                ]
-            )
-        if not ok:
-            best_rows.append([a, f / 1e9] + ["none"] + ["-"] * 9)
 
     min_n = []
     for a, f in itertools.product(m.ARCHITECTURES, F_MOD):
@@ -381,92 +319,64 @@ def feasibility_section(records: list[dict]) -> str:
             and r["ok_rate"]
         ]
         min_n.append([a, f / 1e9, min(hits) if hits else "-"])
-    return "\n\n".join(
-        [
-            "## 5. Feasible design points (optics-derived gap, cap 3 mm)",
-            "Feasible = optics fits the gap cap, thermal fits within 400 mm2, and"
-            " the workload speedup over 1D is >= 10x (after any gap-lane rate"
-            " limit). Cells give the largest feasible N per dimension over the"
-            f" swept N {list(N_VALUES)} and via options.",
-            _table(header, rows),
-            "Smallest N reaching 10x at full shot rate (geometry only):",
-            _table(["arch", "f_mod (GHz)", "N_min"], min_n),
-            "Highest-throughput feasible points:",
-            _table(
-                [
-                    "arch",
-                    "f_mod",
-                    "N",
-                    "pixel",
-                    "G",
-                    "via",
-                    "gap (um)",
-                    "speedup",
-                    "TMAC/s",
-                    "stack W",
-                    "footprint mm2",
-                    "memory",
-                ],
-                best_rows,
-            ),
-        ]
-    )
 
-
-def target_section(records: list[dict], n: int = 100) -> str:
-    """Least optical compression that makes the N x N target feasible."""
-    rows = []
-    for a, f, pixel in itertools.product(m.ARCHITECTURES, F_MOD, PIXEL_OPTIONS):
-        ok = [
+    points = []
+    for a, f, via_label in itertools.product(m.ARCHITECTURES, F_MOD, VIA_OPTIONS):
+        cands = [
             r
             for r in records
-            if r["n"] == n
+            if r["n"] == 100
             and r["arch"] == a
             and r["f_mod_ghz"] == f / 1e9
-            and r["pixel_option"] == pixel
-            and r["feasible"]
+            and r["via_option"] == via_label
         ]
-        if not ok:
-            rows.append([a, f / 1e9, pixel, f"> {max(COMPRESSIONS):g}"] + ["-"] * 8)
-            continue
-        r = min(ok, key=lambda r: (r["compression"], r["footprint_thermal_mm2"]))
-        rows.append(
+        full = [r for r in cands if r["feasible"] and r["ok_rate"]]
+        feas = full or [r for r in cands if r["feasible"]]
+        r = min(feas or cands, key=lambda r: r["via_budget_mm2"])
+        points.append(
             [
                 a,
                 f / 1e9,
-                pixel,
-                r["compression"],
-                r["via_option"],
-                r["gap_um"],
+                via_label,
+                r["via_budget_mm2"] if feas else "-",
+                "full rate" if full else ("throttled" if feas else "no"),
+                r["failing"],
                 r["speedup_workload"],
                 r["tmacs"],
+                r["via_field_mm2"],
                 r["p_stack_w"],
-                r["p_laser_w"],
                 r["footprint_thermal_mm2"],
                 r["mem_devices"],
             ]
         )
     return "\n\n".join(
         [
-            f"## 6. Design points for the {n} x {n} target",
-            "Least swept compression G that makes each option feasible, then the"
-            " smallest thermal footprint among via options.",
+            "## 5. Feasible design points",
+            "Feasible = thermal fits within 400 mm2 and the workload speedup over"
+            " 1D is >= 10x after any gap-lane or memory rate limit. Cells give"
+            " the largest N per side that is feasible at full shot rate (gap"
+            f" lanes not throttling) over the swept N {list(N_VALUES)}.",
+            _table(header, rows),
+            "Smallest N reaching 10x at full shot rate (any via option):",
+            _table(["arch", "f_mod (GHz)", "N_min"], min_n),
+            "N = 100 design points (smallest gap-via budget that runs at full"
+            " rate; else the smallest feasible but throttled one):",
             _table(
                 [
                     "arch",
                     "f_mod",
-                    "pixel",
-                    "G",
                     "via",
-                    "gap (um)",
+                    "budget mm2",
+                    "feasible",
+                    "failing",
                     "speedup",
                     "TMAC/s",
+                    "via field mm2",
                     "stack W",
-                    "laser W",
                     "footprint mm2",
                     "memory",
                 ],
-                rows,
+                points,
             ),
         ]
     )
@@ -491,6 +401,7 @@ SENSITIVITY_CASES = (
     ),
     ("cold plate 0.15 K cm2/W", {"thermal__r_sink_kcm2_w": 0.15}),
     ("gap via budget 250 mm2", {"via_area_budget_mm2": 250.0}),
+    ("TGV AR 20 (25/50 um)", {"via__aspect_ratio": 20.0}),
 )
 
 
@@ -499,13 +410,14 @@ def sensitivity_section() -> str:
     for label, changes in SENSITIVITY_CASES:
         row = [label]
         for f, a in itertools.product(F_MOD, m.ARCHITECTURES):
-            p = _params("ideal-5um", gap_um=500.0, f_mod_hz=f, **changes)
-            r = m.evaluate(a, p)
+            r = m.evaluate(a, _params(f_mod_hz=f, **changes))
             cell = f"{r['p_stack_w']:.0f} W, {r['footprint_thermal_mm2']:.0f} mm2"
             if not r["ok_thermal"]:
                 cell += " HOT"
             if not r["ok_target"]:
                 cell += " <10x"
+            elif not r["ok_rate"]:
+                cell += " throttled"
             row.append(cell)
         rows.append(row)
     header = ["case"] + [
@@ -513,10 +425,10 @@ def sensitivity_section() -> str:
     ]
     return "\n\n".join(
         [
-            "## 7. Power and thermal sensitivity (N = 100, 500 um TGV gap)",
+            "## 6. Power and thermal sensitivity (N = 100, 500 um TGV gap)",
             "Cells: stack power (excludes the off-stack laser) and the thermal"
-            " footprint. HOT = exceeds limits even at 400 mm2; <10x = gap lanes"
-            " throttle the shot rate below the target.",
+            " footprint. HOT = exceeds limits even at 400 mm2; throttled = gap"
+            " lanes hold the shot rate below f_mod / passes; <10x = below target.",
             _table(header, rows),
         ]
     )
@@ -538,12 +450,11 @@ def build_report() -> tuple[str, list[dict], list[dict]]:
         "# 2D pJTC packaging study (generated)",
         "Generated by `python -m packaging2d.study`. First-order placeholders;"
         " see `packaging2d/README.md` for assumptions.",
-        optics_section(),
+        assumptions_section(),
         via_section(),
         crossing_section(),
         baseline_md,
         feasibility_section(records),
-        target_section(records),
         sensitivity_section(),
     ]
     return "\n\n".join(parts) + "\n", baseline, records
