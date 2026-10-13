@@ -86,6 +86,8 @@ PIC lanes without crossing the gap.
    10 GHz. With TSVs, A/B are throttled below 10x at 10 GHz.
 3. **C removes the crossing and doubles the shot rate.** The speedup is 73x
    (C) against 37x (A/B). The 10x target needs N >= 40 (C) or N >= 56 (A/B).
+   The 1D baseline completes one shot per modulation period; if the 1D chip
+   also reuses one lens for both passes, every speedup doubles.
    C pays with 2x rings (heater power), 2x laser and a buried bottom die that
    dissipates 17 W (1 GHz) to 76 W (10 GHz).
 4. **Thermal ranks A, C << B.** At 1 GHz the stacks dissipate 26 / 26 / 39 W
@@ -93,10 +95,11 @@ PIC lanes without crossing the gap.
    400 mm2 because its top package sits in the heat path; A needs 150 mm2 with
    AR 20 TGVs and C 177 mm2 at 184 W. Halving TIA and driver energy and
    integrating 8 shots per ADC brings C to 98 W and 95 mm2.
-5. **Memory is not the bottleneck when reuse is good.** 1 GHz needs one
-   LPDDR5X. 10 GHz needs 3 LPDDR5X (A/B) or one HBM3 (C). In C the memory
-   traffic crosses the gap on ~3-30 serialized TGV lanes; flipping C to put
-   the package on the EIC side removes that.
+5. **Memory is not the bottleneck when reuse is good.** At 1 GHz A and C
+   need one LPDDR5X and B one per package. At 10 GHz A needs 3 LPDDR5X, B 3 on
+   top plus 1 below, and C one HBM3 (184 GB/s). In C the memory traffic
+   crosses the gap on 3 (1 GHz) to 28 (10 GHz) serialized TGV lanes; how an
+   HBM3 attaches to C at 10 GHz is not modelled yet.
 6. **Power delivery is not the constraint.** The worst case, C at 10 GHz,
    needs ~250 power vias for 108 W crossing the gap.
 
@@ -109,7 +112,8 @@ PIC lanes without crossing the gap.
 | DP3 | A | 1 GHz | TGV AR20: 1,430 lanes, TDM x7 | 37x | 26 | 7 | ~33 mm2 |
 
 A at 10 GHz is also feasible with AR 20 TGVs (125 W, ~150 mm2, 50 mm2 of via
-field). B is not carried forward: it keeps the gap-crossing Fourier loop and
+field), or with AR 10 TGVs if the gap-via budget is raised to 250 mm2 (its
+field is 201 mm2; at 200 mm2 it throttles to ~15x). B is not carried forward: it keeps the gap-crossing Fourier loop and
 adds the worst heat path.
 
 ## Limitations
